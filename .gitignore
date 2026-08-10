@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+.env
+.idea/
+.vscode/
+.DS_Store
+*.log
+
+# runtime data (mounted via docker, not in repo)
+workspace/
+memory/
+tmp/
