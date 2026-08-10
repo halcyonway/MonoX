@@ -10,13 +10,17 @@
   uv run python run.py            # normal
   uv run python run.py --debug    # debug
 
+运行时:
+  F12              切换 debug 视图（控制台提示 on/off；不影响 reasoning）
+  Ctrl+C           优雅退出
+
 输出 (Rich):
   TokenChunk:        流式打印
   ReasoningChunk:    流式累积 + 整体 flush（grey50 italic 💭）— normal 也显示
   ToolStart:         Panel 卡片（cyan border）
   ToolEnd:           Syntax 高亮 stdout + 非 0 exit 红字
   FinalMessage:      metrics 摘要 + 空行分隔
-  StatusChange:      [debug] 状态切换（bold magenta）
+  StatusChange:      [debug] thinking 时显示 spinner（⏳ + 状态名）；其他状态行
   MetricChunk:       [debug] step / latency / tokens 详情（dim）
 
 输入 (prompt_toolkit):
@@ -32,9 +36,12 @@ from pathlib import Path
 from prompt_toolkit import PromptSession
 from prompt_toolkit.formatted_text import FormattedText
 from prompt_toolkit.history import FileHistory
+from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.patch_stdout import patch_stdout
 from rich.console import Console
+from rich.live import Live
 from rich.panel import Panel
+from rich.spinner import Spinner
 from rich.syntax import Syntax
 
 from core.channel.base import Channel
@@ -68,17 +75,51 @@ class TerminalChannel:
         self.console = Console()
         self._debug = debug
         self._reasoning_buf = ""
+        self._spinner: Live | None = None
         _HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
         self._prompt_session = PromptSession(
             history=FileHistory(str(_HISTORY_PATH)),
             message=_prompt_message,
+            key_bindings=self._build_keybindings(),
         )
+
+    def _build_keybindings(self) -> KeyBindings:
+        kb = KeyBindings()
+
+        @kb.add("f12")
+        def _toggle_debug(event) -> None:
+            self._debug = not self._debug
+            self._stop_spinner()
+            label = "on" if self._debug else "off"
+            # patch_stdout 在 prompt 内包着，直接 console.print 会打乱 prompt
+            self.console.print(f"\n[dim]debug view: {label}[/dim]")
+            event.app.invalidate()
+
+        return kb
+
+    def _start_spinner(self, state: str) -> None:
+        if self._spinner is not None:
+            return
+        self._spinner = Live(
+            Spinner("dots", text=f" {state}", style="bold magenta"),
+            console=self.console,
+            transient=True,
+            refresh_per_second=12,
+        )
+        self._spinner.start()
+
+    def _stop_spinner(self) -> None:
+        if self._spinner is None:
+            return
+        self._spinner.stop()
+        self._spinner = None
 
     async def start(self) -> None:
         self._reader = asyncio.create_task(self._read_loop())
 
     async def stop(self) -> None:
         self._stop.set()
+        self._stop_spinner()
         if self._reader:
             await self._reader
 
@@ -121,8 +162,10 @@ class TerminalChannel:
             self._reasoning_buf = ""
 
         if isinstance(event, TokenChunk):
+            self._stop_spinner()
             self.console.print(event.text, end="", highlight=False)
         elif isinstance(event, ToolStart):
+            self._stop_spinner()
             self.console.print()
             self.console.print(
                 Panel(
@@ -134,14 +177,23 @@ class TerminalChannel:
                 )
             )
         elif isinstance(event, ToolEnd):
+            self._stop_spinner()
             self._write_tool_result(event.result.stdout, event.result.exit_code)
         elif isinstance(event, StatusChange):
-            if self._debug:
+            if not self._debug:
+                self._stop_spinner()
+                return
+            if event.state == "thinking":
+                self._start_spinner(event.state)
+            else:
+                self._stop_spinner()
                 self.console.print(f"[bold magenta]⟫ {event.state}[/bold magenta]")
         elif isinstance(event, MetricChunk):
             if self._debug:
+                self._stop_spinner()
                 self._print_metric(event.metrics)
         elif isinstance(event, FinalMessage):
+            self._stop_spinner()
             self._write_final_metrics(event.metrics)
             self.console.print()
 
