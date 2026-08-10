@@ -1,12 +1,15 @@
 FROM python:3.11-slim
 
+# uv
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
 WORKDIR /app
 
-RUN pip install --no-cache-dir uv
+# 利用 Docker layer cache：先复制 lock 文件
+COPY pyproject.toml uv.lock .python-version ./
+RUN uv sync --frozen --no-dev
 
-COPY pyproject.toml .
-RUN uv pip install --system .
-
+# 再复制源码
 COPY core/ core/
 COPY extensions/ extensions/
 
@@ -15,4 +18,4 @@ ENV MONOX_DATA=/var/agent
 
 VOLUME ["/var/agent", "/etc/agent"]
 
-CMD ["python", "-m", "core.main", "/etc/agent/config.toml"]
+CMD ["uv", "run", "python", "-m", "core.main", "/etc/agent/config.toml"]
