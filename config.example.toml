@@ -14,7 +14,15 @@ session_key = "default"
 # [llm] LLMProxy 配置
 # ============================================================
 # v0: 只调一个模型。harness (retry/fallback/rate-limit) 后续在 LLMProxy 内部加。
-# api_key 支持 tomli/tomllib 的环境变量插值：${OPENAI_API_KEY}
+# 协议：OpenAI-compatible stream (SSE: "data: {...}\n\n")，不依赖 openai sdk，纯 httpx。
+# api_key 支持环境变量插值：${VAR_NAME}。
+# 切换第三方 API：改 api_base / api_key / model 三个字段。
+#
+# 示例：
+#   DeepSeek:   api_base = "https://api.deepseek.com/v1",  model = "deepseek-chat"
+#   Moonshot:   api_base = "https://api.moonshot.cn/v1",   model = "moonshot-v1-8k"
+#   硅基流动:   api_base = "https://api.siliconflow.cn/v1", model = "Qwen/Qwen2.5-72B-Instruct"
+#   自建 proxy: api_base = "http://your-proxy:8000/v1",    model = "your-model"
 [llm]
 api_base = "https://api.openai.com/v1"
 api_key = "${OPENAI_API_KEY}"
