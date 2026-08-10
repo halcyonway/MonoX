@@ -1,20 +1,22 @@
 """Local terminal channel adapter — Rich + prompt_toolkit.
 
+模式:
+  debug=False (默认): TokenChunk / ToolStart / ToolEnd / FinalMessage
+  debug=True:          上述 + StatusChange / ReasoningChunk / MetricChunk
+                       启动: uv run python run.py --debug
+                             或 MONOX_DEBUG=1 uv run python run.py
+
 输出 (Rich):
   TokenChunk:        流式打印
   ToolStart:         Panel 卡片（cyan border）
   ToolEnd:           Syntax 高亮 stdout + 非 0 exit 红字
   FinalMessage:      metrics 摘要 + 空行分隔
-  ReasoningChunk:    静默
-  StatusChange:      静默
-  MetricChunk:       静默
+  ReasoningChunk:    [debug] 流式累积 + 整体 flush（grey50 italic 💭）
+  StatusChange:      [debug] 状态切换标记（bold magenta）
+  MetricChunk:       [debug] step / latency / tokens 详情（dim）
 
 输入 (prompt_toolkit):
-  - 完整 line editor（光标移动、删除、history 上下、自动补全）
-  - history 持久化到 .monox/history
-  - patch_stdout 让 Rich 流式输出不破坏 prompt 位置
-  - cyan ❯ prompt
-  - exit / quit / Ctrl+C 优雅退出
+  - 完整 line editor + 持久 history + patch_stdout 跟 Rich 流式输出共存
 """
 from __future__ import annotations
 
@@ -35,6 +37,9 @@ from core.channel.base import Channel
 from core.protocol import (
     FinalMessage,
     InboundEvent,
+    MetricChunk,
+    ReasoningChunk,
+    StatusChange,
     StreamEvent,
     TokenChunk,
     ToolEnd,
@@ -51,12 +56,14 @@ def _prompt_message() -> FormattedText:
 
 
 class TerminalChannel:
-    def __init__(self, session_key: str = "default") -> None:
+    def __init__(self, session_key: str = "default", debug: bool = False) -> None:
         self._session_key = session_key
         self._queue: asyncio.Queue[InboundEvent] = asyncio.Queue()
         self._stop = asyncio.Event()
         self._reader: asyncio.Task | None = None
         self.console = Console()
+        self._debug = debug
+        self._reasoning_buf = ""
         _HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
         self._prompt_session = PromptSession(
             history=FileHistory(str(_HISTORY_PATH)),
@@ -97,6 +104,19 @@ class TerminalChannel:
                 continue
 
     async def send(self, event: StreamEvent) -> None:
+        # Reasoning 流式累积（debug 时整体 flush）
+        if isinstance(event, ReasoningChunk):
+            self._reasoning_buf += event.text
+            return
+
+        # 切换到非 reasoning，先 flush buffer
+        if self._reasoning_buf:
+            if self._debug:
+                self.console.print(
+                    f"[grey50 italic]💭 {self._reasoning_buf.rstrip()}[/grey50 italic]"
+                )
+            self._reasoning_buf = ""
+
         if isinstance(event, TokenChunk):
             self.console.print(event.text, end="", highlight=False)
         elif isinstance(event, ToolStart):
@@ -112,9 +132,27 @@ class TerminalChannel:
             )
         elif isinstance(event, ToolEnd):
             self._write_tool_result(event.result.stdout, event.result.exit_code)
+        elif isinstance(event, StatusChange):
+            if self._debug:
+                self.console.print(f"[bold magenta]⟫ {event.state}[/bold magenta]")
+        elif isinstance(event, MetricChunk):
+            if self._debug:
+                self._print_metric(event.metrics)
         elif isinstance(event, FinalMessage):
             self._write_final_metrics(event.metrics)
             self.console.print()
+
+    def _print_metric(self, m: dict) -> None:
+        tokens = m.get("tokens") or {}
+        parts = [
+            f"step={m.get('step_idx')}",
+            f"latency={m.get('latency_ms')}ms",
+            f"tools={m.get('tool_calls_count', 0)}",
+        ]
+        if tokens:
+            parts.append(f"in={tokens.get('prompt_tokens', '?')}")
+            parts.append(f"out={tokens.get('completion_tokens', '?')}")
+        self.console.print(f"  [dim]{' '.join(parts)}[/dim]")
 
     def _write_tool_result(self, stdout: str, exit_code: int) -> None:
         out = stdout.rstrip("\n")

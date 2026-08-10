@@ -1,13 +1,17 @@
 """MonoX 启动入口（装配所有组件）。
 
-core/ 是稳定内核；装配在顶层 run.py。运行：
+core/ 是稳定内核；装配在顶层 run.py。
 
-    uv run python run.py [config.toml]
+    uv run python run.py [config.toml] [--debug]
+
+环境变量:
+    MONOX_DEBUG=1   等价于 --debug
 """
 from __future__ import annotations
 
+import argparse
 import asyncio
-import sys
+import os
 from pathlib import Path
 
 from core.channel.base import Channel
@@ -39,9 +43,20 @@ Tool results may be L1-compressed; if you see budget_id, call read_tool_result_b
 When you are done with the current turn and ready to receive the next message, call wait_io. If the user sends a new message while you are mid-task, it will be appended to the conversation and you can keep going."""
 
 
-def build_channel(cfg: Config):
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="MonoX agent runtime")
+    parser.add_argument("config", nargs="?", default="config.toml", help="config.toml path")
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Show loop internals (status, reasoning, metrics). Equiv to MONOX_DEBUG=1.",
+    )
+    return parser.parse_args()
+
+
+def build_channel(cfg: Config, debug: bool) -> Channel:
     if cfg.channel.kind == "terminal":
-        return TerminalChannel(cfg.session_key)
+        return TerminalChannel(cfg.session_key, debug=debug)
     raise NotImplementedError(f"channel kind not implemented: {cfg.channel.kind}")
 
 
@@ -51,7 +66,7 @@ def _ensure_dirs(paths: dict[str, Path]) -> None:
         paths[key].mkdir(parents=True, exist_ok=True)
 
 
-async def run(cfg_path: str) -> None:
+async def run(cfg_path: str, debug: bool) -> None:
     cfg = Config.load(cfg_path)
     paths = session_paths(cfg)
     _ensure_dirs(paths)
@@ -83,7 +98,7 @@ async def run(cfg_path: str) -> None:
         skill_summary=skill_summary,
     )
 
-    channel = build_channel(cfg)
+    channel = build_channel(cfg, debug)
     input_q: asyncio.Queue[InboundEvent] = asyncio.Queue()
     output_q: asyncio.Queue[StreamEvent] = asyncio.Queue()
     gateway = Gateway(channel, loop_input=input_q, loop_output=output_q)
@@ -92,4 +107,6 @@ async def run(cfg_path: str) -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(run(sys.argv[1] if len(sys.argv) > 1 else "config.toml"))
+    args = parse_args()
+    debug = args.debug or os.environ.get("MONOX_DEBUG") == "1"
+    asyncio.run(run(args.config, debug))
