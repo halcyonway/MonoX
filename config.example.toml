@@ -19,10 +19,11 @@ session_key = "default"
 # 切换第三方 API：改 api_base / api_key / model 三个字段。
 #
 # 示例：
-#   DeepSeek:   api_base = "https://api.deepseek.com/v1",  model = "deepseek-chat"
-#   Moonshot:   api_base = "https://api.moonshot.cn/v1",   model = "moonshot-v1-8k"
-#   硅基流动:   api_base = "https://api.siliconflow.cn/v1", model = "Qwen/Qwen2.5-72B-Instruct"
-#   自建 proxy: api_base = "http://your-proxy:8000/v1",    model = "your-model"
+#   DeepSeek:   api_base = "https://api.deepseek.com/v1",     model = "deepseek-chat"
+#   Moonshot:   api_base = "https://api.moonshot.cn/v1",      model = "moonshot-v1-8k"
+#   硅基流动:   api_base = "https://api.siliconflow.cn/v1",   model = "Qwen/Qwen2.5-72B-Instruct"
+#   MiniMax:    api_base = "https://api.minimaxi.com/v1",     model = "abab6.5s-chat"
+#   自建 proxy: api_base = "http://your-proxy:8000/v1",       model = "your-model"
 [llm]
 api_base = "https://api.openai.com/v1"
 api_key = "${OPENAI_API_KEY}"
