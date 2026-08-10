@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -66,13 +67,46 @@ def _prompt_message() -> FormattedText:
     return FormattedText([("class:prompt", "❯ ")])
 
 
+class _RichStdout:
+    """Thin wrapper around the real stdout for use as Rich's file target.
+
+    prompt_toolkit's `patch_stdout` replaces `sys.stdout` with a proxy whose
+    `isatty()` returns False, which makes Rich emit plain text without ANSI
+    escapes. We bypass that proxy by binding Rich directly to the real fd,
+    so colors / cursor control sequences always reach the terminal.
+
+    Writes here do NOT participate in patch_stdout's prompt redraw — which
+    is intentional: Rich (Live, Spinner, Panel) owns the screen during output
+    and prompt_toolkit redraws the prompt once output stops.
+    """
+
+    def __init__(self) -> None:
+        self._f = sys.__stdout__
+
+    def write(self, data: str) -> int:
+        return self._f.write(data)
+
+    def flush(self) -> None:
+        self._f.flush()
+
+    def isatty(self) -> bool:
+        return self._f.isatty()
+
+    def fileno(self) -> int:
+        return self._f.fileno()
+
+    @property
+    def closed(self) -> bool:
+        return self._f.closed
+
+
 class TerminalChannel:
     def __init__(self, session_key: str = "default", debug: bool = False) -> None:
         self._session_key = session_key
         self._queue: asyncio.Queue[InboundEvent] = asyncio.Queue()
         self._stop = asyncio.Event()
         self._reader: asyncio.Task | None = None
-        self.console = Console()
+        self.console = Console(file=_RichStdout())
         self._debug = debug
         self._reasoning_buf = ""
         self._spinner: Live | None = None
