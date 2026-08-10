@@ -28,6 +28,7 @@ from core.protocol import (
     LLMProxy,
     MemoryStore,
     MetricChunk,
+    ReasoningChunk,
     StatusChange,
     StreamEvent,
     TokenChunk,
@@ -78,7 +79,6 @@ class LoopEngine:
         while True:
             ev = await input_queue.get()
             self._messages.append({"role": "user", "content": ev.text})
-            await output_queue.put(StatusChange(state="thinking"))
 
             final_text = await self._react(input_queue, output_queue)
 
@@ -126,6 +126,8 @@ class LoopEngine:
                 if chunk.delta_text:
                     full_text += chunk.delta_text
                     await output_queue.put(TokenChunk(text=chunk.delta_text))
+                if chunk.delta_reasoning:
+                    await output_queue.put(ReasoningChunk(text=chunk.delta_reasoning))
                 if chunk.delta_tool_calls:
                     _merge_tool_calls(tool_calls, chunk.delta_tool_calls)
                 if chunk.finish_reason:

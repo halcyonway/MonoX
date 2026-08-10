@@ -59,8 +59,11 @@ class OpenAIStreamProxy(LLMProxy):
         delta = choices[0].get("delta") or {}
         finish = choices[0].get("finish_reason")
         usage = chunk.get("usage")
+        # o1 / DeepSeek-R1 等把 reasoning 放在 reasoning_content（或 reasoning）字段
+        reasoning = delta.get("reasoning_content") or delta.get("reasoning")
         return LlmChunk(
             delta_text=delta.get("content"),
+            delta_reasoning=reasoning,
             delta_tool_calls=tuple(delta.get("tool_calls") or ()),
             finish_reason=finish,
             usage=usage,

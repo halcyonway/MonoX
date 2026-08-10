@@ -10,7 +10,7 @@ import asyncio
 import sys
 from pathlib import Path
 
-from core.channel import TerminalChannel
+from core.channel.base import Channel
 from core.config import Config, session_paths
 from core.gateway import Gateway
 from core.llm_proxy import OpenAIStreamProxy
@@ -27,6 +27,7 @@ from core.loop.skill_summary import SkillSummaryLoader
 from core.memory import FsMemoryStore
 from core.protocol import InboundEvent, StreamEvent
 from core.sandbox import BashRunner
+from extensions.channels import TerminalChannel
 
 
 DEFAULT_SYSTEM = """You are MonoX, a coding agent. You run inside a sandboxed bash environment.

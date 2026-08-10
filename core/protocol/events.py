@@ -36,6 +36,12 @@ class TokenChunk:
 
 
 @dataclass(frozen=True)
+class ReasoningChunk:
+    """LLM 内部推理（o1 / DeepSeek-R1 等），channel 决定是否展示。"""
+    text: str
+
+
+@dataclass(frozen=True)
 class ToolStart:
     name: str
     args: dict[str, Any]
@@ -78,6 +84,7 @@ class ErrorEvent:
 
 StreamEvent = Union[
     TokenChunk,
+    ReasoningChunk,
     ToolStart,
     ToolEnd,
     StatusChange,
@@ -114,6 +121,7 @@ class ToolResult:
 @dataclass(frozen=True)
 class LlmChunk:
     delta_text: str | None = None
+    delta_reasoning: str | None = None  # o1 / DeepSeek-R1 等内部推理
     delta_tool_calls: tuple[dict[str, Any], ...] | None = None
     finish_reason: str | None = None
     usage: dict[str, Any] | None = None

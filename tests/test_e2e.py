@@ -29,6 +29,7 @@ from core.protocol import (
     InboundEvent,
     LlmChunk,
     LLMProxy,
+    ReasoningChunk,
     StatusChange,
     StreamEvent,
 )
