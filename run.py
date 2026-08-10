@@ -2,12 +2,13 @@
 
 core/ 是稳定内核；装配在顶层 run.py。
 
-    uv run python run.py [config.toml] [--debug]
+    uv run python run.py [config.toml] [--debug] [--session_key NAME]
 """
 from __future__ import annotations
 
 import argparse
 import asyncio
+import dataclasses
 from pathlib import Path
 
 from core.channel.base import Channel
@@ -47,6 +48,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Show loop internals (state transitions, step metrics). Reasoning is always shown.",
     )
+    parser.add_argument(
+        "--session_key",
+        default=None,
+        help="Isolate workspace/memory/checkpoint under this name (default: 'default').",
+    )
     return parser.parse_args()
 
 
@@ -62,8 +68,11 @@ def _ensure_dirs(paths: dict[str, Path]) -> None:
         paths[key].mkdir(parents=True, exist_ok=True)
 
 
-async def run(cfg_path: str, debug: bool) -> None:
+async def run(cfg_path: str, debug: bool, session_key: str | None) -> None:
     cfg = Config.load(cfg_path)
+    if session_key:
+        # CLI 覆盖 config.toml 里的 session_key
+        cfg = dataclasses.replace(cfg, session_key=session_key)
     paths = session_paths(cfg)
     _ensure_dirs(paths)
 
@@ -104,4 +113,4 @@ async def run(cfg_path: str, debug: bool) -> None:
 
 if __name__ == "__main__":
     args = parse_args()
-    asyncio.run(run(args.config, args.debug))
+    asyncio.run(run(args.config, args.debug, args.session_key))

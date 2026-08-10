@@ -148,6 +148,16 @@ class LoopEngine:
                 pending = _drain(input_queue)
                 if not pending:
                     # 4a) 没新事件 → wait_io，react 结束
+                    # 持久化 final message：纯对话 turn 也得写盘，否则重启丢历史
+                    await self._checkpoint.save(
+                        CheckpointRecord(
+                            session_key=self._session_key,
+                            step_idx=self._step_idx,
+                            messages=tuple(self._messages),
+                            tool_results=(),
+                            compressed_snapshot=None,
+                        )
+                    )
                     await output_queue.put(StatusChange(state="wait_io"))
                     return final_text
                 # 4b) 有新事件 → aggregate，继续 react

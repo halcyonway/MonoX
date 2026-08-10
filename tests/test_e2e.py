@@ -82,9 +82,9 @@ class MockChannel(Channel):
 
 
 def build(tmp: Path) -> tuple[ToolRegistry, FsMemoryStore, JsonlCheckpointStore, str]:
-    ws = tmp / "ws"; ws.mkdir(parents=True)
-    mem = tmp / "mem"; mem.mkdir()
-    skills = tmp / "skills"; skills.mkdir()
+    ws = tmp / "ws"; ws.mkdir(parents=True, exist_ok=True)
+    mem = tmp / "mem"; mem.mkdir(exist_ok=True)
+    skills = tmp / "skills"; skills.mkdir(exist_ok=True)
 
     runner = BashRunner()
     budget = ReadToolResultBudgetTool()
@@ -207,10 +207,69 @@ async def test_queue_aggregate_continues_react() -> None:
     print("test_queue_aggregate_continues_react PASSED ✓")
 
 
+async def test_chat_only_persists_across_restart() -> None:
+    """纯对话 turn（无 tool）也必须写 checkpoint；重启后 messages 完整恢复。
+    模拟用户场景：run.py 启 → 对话 → Ctrl+C → 再启，agent 仍记得上次聊了什么。
+    """
+    tmp = Path("/tmp/test_e2e_persist"); shutil.rmtree(tmp, ignore_errors=True); tmp.mkdir()
+
+    # turn 1：纯对话，agent 说 "first reply" 就停
+    llm1 = MockLLM([
+        [LlmChunk(delta_text="first reply", finish_reason="stop")],
+    ])
+    ch1 = await run_pipeline(tmp, llm1, [
+        InboundEvent(session_key="default", kind="message", text="hi there")
+    ])
+    final1 = next(e for e in ch1._sent if isinstance(e, FinalMessage))
+    assert "first reply" in final1.text
+
+    # checkpoint 文件必须存在且非空
+    ck_path = tmp / "mem" / "default" / "checkpoint.jsonl"
+    assert ck_path.exists(), "checkpoint.jsonl should exist after pure chat turn"
+    assert ck_path.stat().st_size > 0, "checkpoint.jsonl should be non-empty"
+
+    # turn 2：重启，新 LLM 看上一次 user msg 是否在 messages 里
+    captured_messages: list[list[dict]] = []
+
+    class CapturingLLM(LLMProxy):
+        async def stream(self, messages, tools=None, options=None):
+            captured_messages.append(list(messages))
+            yield LlmChunk(delta_text="remembered", finish_reason="stop")
+
+    tools, mem_store, ck, skill_sum = build(tmp)
+    loop = LoopEngine(
+        session_key="default", system_prompt="test",
+        llm=CapturingLLM(), tools=tools, budget_tool=tools.get("read_tool_result_budget"),
+        memory=mem_store, checkpoint=ck, skill_summary=skill_sum,
+    )
+    ch2 = MockChannel([InboundEvent(session_key="default", kind="message", text="again")])
+    iq: asyncio.Queue[InboundEvent] = asyncio.Queue()
+    oq: asyncio.Queue[StreamEvent] = asyncio.Queue()
+    gw = Gateway(ch2, loop_input=iq, loop_output=oq)
+    gw_task = asyncio.create_task(gw.run())
+    loop_task = asyncio.create_task(loop.run(iq, oq))
+    await asyncio.wait_for(ch2._final_done.wait(), timeout=10.0)
+    await asyncio.sleep(0.2)
+    gw_task.cancel(); loop_task.cancel()
+    for t in (gw_task, loop_task):
+        try: await t
+        except: pass
+
+    # 第一次 LLM 调用时 messages 必须包含上次的 user message "hi there"
+    assert len(captured_messages) >= 1
+    first_call_msgs = captured_messages[0]
+    user_texts = [m["content"] for m in first_call_msgs if m["role"] == "user"]
+    assert "hi there" in user_texts, (
+        f"previous user message missing after restart; got {user_texts!r}"
+    )
+    print("test_chat_only_persists_across_restart PASSED ✓")
+
+
 async def main() -> None:
     await test_basic_bash()
     await test_wait_io_ends_turn()
     await test_queue_aggregate_continues_react()
+    await test_chat_only_persists_across_restart()
     print("\nALL TESTS PASSED ✓")
 
 
