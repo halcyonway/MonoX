@@ -2,6 +2,11 @@
 
 依赖：httpx（async HTTP）。
 v0: 单模型 + 简单调用，无 retry/fallback（harness 后续在 LLMProxy 内加）。
+
+MiniMax / DeepSeek-R1 等 reasoning 模型：
+- 默认把推理塞进 content（`<think>...</think>`），污染输出
+- 加 `reasoning_split: true` 参数让 API 自动分离到 `reasoning_content` 字段
+- 我们从 delta 提取 `reasoning_content` → LlmChunk.delta_reasoning，channel 决定是否显示
 """
 from __future__ import annotations
 
@@ -34,10 +39,12 @@ class OpenAIStreamProxy(LLMProxy):
             "model": self._cfg.model,
             "messages": messages,
             "stream": True,
+            # 默认启用 reasoning 分离（MiniMax / DeepSeek-R1 等 thinking 模型）
+            "reasoning_split": True,
         }
         if tools:
             payload["tools"] = tools
-        # cfg.options 作默认值，调用方 options 覆盖
+        # cfg.options 作默认值，调用方 options 覆盖（用户可关掉 reasoning_split）
         merged = {**(self._cfg.options or {}), **(options or {})}
         payload.update(merged)
 
@@ -59,7 +66,6 @@ class OpenAIStreamProxy(LLMProxy):
         delta = choices[0].get("delta") or {}
         finish = choices[0].get("finish_reason")
         usage = chunk.get("usage")
-        # o1 / DeepSeek-R1 等把 reasoning 放在 reasoning_content（或 reasoning）字段
         reasoning = delta.get("reasoning_content") or delta.get("reasoning")
         return LlmChunk(
             delta_text=delta.get("content"),
