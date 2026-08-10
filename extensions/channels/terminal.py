@@ -1,18 +1,22 @@
 """Local terminal channel adapter — Rich + prompt_toolkit.
 
-模式:
-  debug=False (默认): TokenChunk / ToolStart / ToolEnd / FinalMessage
-  debug=True:          上述 + StatusChange / ReasoningChunk / MetricChunk
-                       启动: uv run python run.py --debug
-                             或 MONOX_DEBUG=1 uv run python run.py
+两档:
+  normal (默认):   TokenChunk / ReasoningChunk / ToolStart / ToolEnd / FinalMessage
+                   推理是基本 output，正常用户也想看模型在想什么
+  debug (--debug):  上述 + StatusChange + MetricChunk
+                   状态切换 + step / latency / tokens 详情
+
+启动:
+  uv run python run.py            # normal
+  uv run python run.py --debug    # debug
 
 输出 (Rich):
   TokenChunk:        流式打印
+  ReasoningChunk:    流式累积 + 整体 flush（grey50 italic 💭）— normal 也显示
   ToolStart:         Panel 卡片（cyan border）
   ToolEnd:           Syntax 高亮 stdout + 非 0 exit 红字
   FinalMessage:      metrics 摘要 + 空行分隔
-  ReasoningChunk:    [debug] 流式累积 + 整体 flush（grey50 italic 💭）
-  StatusChange:      [debug] 状态切换标记（bold magenta）
+  StatusChange:      [debug] 状态切换（bold magenta）
   MetricChunk:       [debug] step / latency / tokens 详情（dim）
 
 输入 (prompt_toolkit):
@@ -104,17 +108,16 @@ class TerminalChannel:
                 continue
 
     async def send(self, event: StreamEvent) -> None:
-        # Reasoning 流式累积（debug 时整体 flush）
+        # Reasoning 流式累积（normal 也显示，flush 到下一个非 reasoning event）
         if isinstance(event, ReasoningChunk):
             self._reasoning_buf += event.text
             return
 
         # 切换到非 reasoning，先 flush buffer
         if self._reasoning_buf:
-            if self._debug:
-                self.console.print(
-                    f"[grey50 italic]💭 {self._reasoning_buf.rstrip()}[/grey50 italic]"
-                )
+            self.console.print(
+                f"[grey50 italic]💭 {self._reasoning_buf.rstrip()}[/grey50 italic]"
+            )
             self._reasoning_buf = ""
 
         if isinstance(event, TokenChunk):

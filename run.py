@@ -3,15 +3,11 @@
 core/ 是稳定内核；装配在顶层 run.py。
 
     uv run python run.py [config.toml] [--debug]
-
-环境变量:
-    MONOX_DEBUG=1   等价于 --debug
 """
 from __future__ import annotations
 
 import argparse
 import asyncio
-import os
 from pathlib import Path
 
 from core.channel.base import Channel
@@ -49,7 +45,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--debug",
         action="store_true",
-        help="Show loop internals (status, reasoning, metrics). Equiv to MONOX_DEBUG=1.",
+        help="Show loop internals (state transitions, step metrics). Reasoning is always shown.",
     )
     return parser.parse_args()
 
@@ -108,5 +104,4 @@ async def run(cfg_path: str, debug: bool) -> None:
 
 if __name__ == "__main__":
     args = parse_args()
-    debug = args.debug or os.environ.get("MONOX_DEBUG") == "1"
-    asyncio.run(run(args.config, debug))
+    asyncio.run(run(args.config, args.debug))
