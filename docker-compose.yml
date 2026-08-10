@@ -1,0 +1,13 @@
+services:
+  monox:
+    build: .
+    volumes:
+      - ./config.toml:/etc/agent/config.toml:ro
+      - ./workspace:/var/agent/workspace
+      - ./memory:/var/agent/memory
+      - ./skills:/var/agent/skills
+      - ./tmp:/var/agent/tmp
+    stdin_open: true
+    tty: true
+    environment:
+      - MONOX_CONFIG=/etc/agent/config.toml

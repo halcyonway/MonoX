@@ -1,0 +1,16 @@
+session_key = "default"
+
+[llm]
+api_base = "https://api.openai.com/v1"
+api_key = "sk-your-key-here"
+model = "gpt-4"
+timeout = 60
+
+[channel]
+kind = "terminal"
+
+[sandbox]
+workspace_root = "/var/agent/workspace"
+memory_root = "/var/agent/memory"
+skills_root = "/var/agent/skills"
+tmp_root = "/var/agent/tmp"
