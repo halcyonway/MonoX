@@ -1,4 +1,9 @@
-"""MonoX runtime 入口：装配所有组件。"""
+"""MonoX 启动入口（装配所有组件）。
+
+core/ 是稳定内核；装配在顶层 run.py。运行：
+
+    uv run python run.py [config.toml]
+"""
 from __future__ import annotations
 
 import asyncio
@@ -39,10 +44,16 @@ def build_channel(cfg: Config):
     raise NotImplementedError(f"channel kind not implemented: {cfg.channel.kind}")
 
 
+def _ensure_dirs(paths: dict[str, Path]) -> None:
+    """启动时确保所有 sandbox 目录存在。"""
+    for key in ("workspace", "memory", "memory_notes", "tmp_root", "skills_root"):
+        paths[key].mkdir(parents=True, exist_ok=True)
+
+
 async def run(cfg_path: str) -> None:
     cfg = Config.load(cfg_path)
     paths = session_paths(cfg)
-    paths["workspace"].mkdir(parents=True, exist_ok=True)
+    _ensure_dirs(paths)
 
     runner = BashRunner()
     budget_tool = ReadToolResultBudgetTool()

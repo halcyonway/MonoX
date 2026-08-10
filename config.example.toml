@@ -51,12 +51,13 @@ kind = "terminal"
 # ============================================================
 # [sandbox] 文件系统路径
 # ============================================================
-# 所有路径在 docker 容器内。docker-compose.yml 已挂载对应 host 目录。
+# 默认相对当前目录，本地开箱即用。docker 部署时改成容器内绝对路径（如 /var/agent/...）。
+# 第一次跑前先执行 scripts/install.sh 建 .monox 目录结构。
 [sandbox]
-workspace_root = "/var/agent/workspace"   # session 工作目录（基于 session_key 自动加子目录）
-memory_root    = "/var/agent/memory"      # Memory.md + notes/ 根目录
-skills_root    = "/var/agent/skills"      # skill 定义目录（共享，不按 session 隔离）
-tmp_root       = "/var/agent/tmp"         # 临时文件
+workspace_root = "./.monox/workspace"   # session 工作目录（基于 session_key 自动加子目录）
+memory_root    = "./.monox/memory"      # Memory.md + notes/ 根目录
+skills_root    = "./.monox/skills"      # skill 定义目录（共享，不按 session 隔离）
+tmp_root       = "./.monox/tmp"         # 临时文件
 
 
 # ============================================================

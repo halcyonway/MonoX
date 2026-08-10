@@ -81,12 +81,16 @@ class Config:
 
 
 def session_paths(cfg: Config) -> dict[str, Path]:
-    """基于 session_key 的所有隔离路径。"""
+    """所有 sandbox 路径。session 维度的自动按 session_key 隔离。"""
     base = Path(cfg.sandbox.workspace_root)
     return {
+        # session 隔离
         "workspace": base / cfg.session_key,
         "memory": Path(cfg.sandbox.memory_root) / cfg.session_key,
         "checkpoint": Path(cfg.sandbox.memory_root) / cfg.session_key / "checkpoint.jsonl",
         "memory_index": Path(cfg.sandbox.memory_root) / cfg.session_key / "Memory.md",
         "memory_notes": Path(cfg.sandbox.memory_root) / cfg.session_key / "notes",
+        # 共享，不按 session 隔离
+        "skills_root": Path(cfg.sandbox.skills_root),
+        "tmp_root": Path(cfg.sandbox.tmp_root),
     }

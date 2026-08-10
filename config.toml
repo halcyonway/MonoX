@@ -1,19 +1,20 @@
-# MonoX dev config — 请按需修改。
-# api_key 用环境变量 OPENAI_API_KEY 注入，避免明文入库。
+# MonoX dev config — 本地默认配置。
+# 路径用 ./ 开头，相对当前目录；也可用绝对路径。
+# 第一次跑前先执行 scripts/install.sh 建 .monox 目录结构。
 
 session_key = "default"
 
 [llm]
-api_base = "https://api.openai.com/v1"
-api_key = "${OPENAI_API_KEY}"   # 从环境变量读；启动前 export OPENAI_API_KEY=sk-xxx
-model = "gpt-4"
+api_base = "https://api.minimaxi.com/v1"
+api_key = "${MINIMAX_API_KEY}"
+model = "MiniMax-M2.7"
 timeout = 60
 
 [channel]
 kind = "terminal"
 
 [sandbox]
-workspace_root = "/var/agent/workspace"
-memory_root    = "/var/agent/memory"
-skills_root    = "/var/agent/skills"
-tmp_root       = "/var/agent/tmp"
+workspace_root = "./.monox/workspace"
+memory_root    = "./.monox/memory"
+skills_root    = "./.monox/skills"
+tmp_root       = "./.monox/tmp"

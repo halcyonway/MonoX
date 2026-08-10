@@ -18,4 +18,4 @@ ENV MONOX_DATA=/var/agent
 
 VOLUME ["/var/agent", "/etc/agent"]
 
-CMD ["uv", "run", "python", "-m", "core.main", "/etc/agent/config.toml"]
+CMD ["uv", "run", "python", "run.py", "/etc/agent/config.toml"]
