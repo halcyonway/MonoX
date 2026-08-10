@@ -22,16 +22,24 @@ session_key = "default"
 #   DeepSeek:   api_base = "https://api.deepseek.com/v1",     model = "deepseek-chat"
 #   Moonshot:   api_base = "https://api.moonshot.cn/v1",      model = "moonshot-v1-8k"
 #   硅基流动:   api_base = "https://api.siliconflow.cn/v1",   model = "Qwen/Qwen2.5-72B-Instruct"
-#   MiniMax:    api_base = "https://api.minimaxi.com/v1",     model = "abab6.5s-chat"
+#   MiniMax:    api_base = "https://api.minimaxi.com/v1",     model = "MiniMax-M2.7"
 #   自建 proxy: api_base = "http://your-proxy:8000/v1",       model = "your-model"
 [llm]
 api_base = "https://api.openai.com/v1"
 api_key = "${OPENAI_API_KEY}"
 model = "gpt-4"
 timeout = 60
-# 透传到 LLM API 的默认 sampling 参数（可选，harness 层使用）
+
+# [llm.options]
+# 默认 sampling 参数（温度 / top_p / 最大 token 等）
 # temperature = 0.7
 # max_tokens = 4096
+
+# [llm.extra_params]
+# 模型特定参数，原样透传到 API。例：
+#   MiniMax / DeepSeek-R1 等 reasoning 模型加 reasoning_split = true
+# Anthropic prompt caching 加 cache_control 等
+# reasoning_split = true
 
 
 # ============================================================

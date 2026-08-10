@@ -38,6 +38,7 @@ class LLMConfig:
     model: str = "gpt-4"
     timeout: int = 60
     options: dict[str, Any] = field(default_factory=dict)  # 默认 sampling 参数
+    extra_params: dict[str, Any] = field(default_factory=dict)  # 模型特定参数（透传 API）
 
 
 @dataclass(frozen=True)
@@ -69,9 +70,17 @@ class Config:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Config":
+        llm_raw = data.get("llm", {})
         return cls(
             session_key=data.get("session_key", "default"),
-            llm=LLMConfig(**data.get("llm", {})),
+            llm=LLMConfig(
+                api_base=llm_raw.get("api_base", ""),
+                api_key=llm_raw.get("api_key", ""),
+                model=llm_raw.get("model", "gpt-4"),
+                timeout=llm_raw.get("timeout", 60),
+                options=llm_raw.get("options", {}),
+                extra_params=llm_raw.get("extra_params", {}),
+            ),
             channel=ChannelConfig(
                 kind=data.get("channel", {}).get("kind", "terminal"),
                 options=data.get("channel", {}).get("options", {}),

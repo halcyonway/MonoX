@@ -10,6 +10,10 @@ api_key = "${MINIMAX_API_KEY}"
 model = "MiniMax-M2.7"
 timeout = 60
 
+[llm.extra_params]
+# reasoning 模型需要把推理从 content 分离到独立字段
+reasoning_split = true
+
 [channel]
 kind = "terminal"
 
