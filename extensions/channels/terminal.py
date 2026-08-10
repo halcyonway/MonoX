@@ -1,24 +1,32 @@
-"""Local terminal channel adapter — Rich-powered UI.
+"""Local terminal channel adapter — Rich + prompt_toolkit.
 
-输出样式:
-  TokenChunk:        流式打印（plain text，markdown 实时渲染留 v2）
-  ToolStart:         Panel（cyan border，工具名 + args）
-  ToolEnd:           Syntax 高亮 stdout（bash theme）+ 非 0 exit 红字
-  FinalMessage:      metrics 摘要（dim）+ 空行分隔
-  ReasoningChunk:    静默（隐藏 o1 / R1 内部推理）
+输出 (Rich):
+  TokenChunk:        流式打印
+  ToolStart:         Panel 卡片（cyan border）
+  ToolEnd:           Syntax 高亮 stdout + 非 0 exit 红字
+  FinalMessage:      metrics 摘要 + 空行分隔
+  ReasoningChunk:    静默
   StatusChange:      静默
   MetricChunk:       静默
-  Card / ErrorEvent: 静默
 
-输入:  Rich console.input("> ") 带颜色 prompt + exit/quit 优雅退出。
+输入 (prompt_toolkit):
+  - 完整 line editor（光标移动、删除、history 上下、自动补全）
+  - history 持久化到 .monox/history
+  - patch_stdout 让 Rich 流式输出不破坏 prompt 位置
+  - cyan ❯ prompt
+  - exit / quit / Ctrl+C 优雅退出
 """
 from __future__ import annotations
 
 import asyncio
 import json
-import sys
 from collections.abc import AsyncIterator
+from pathlib import Path
 
+from prompt_toolkit import PromptSession
+from prompt_toolkit.formatted_text import FormattedText
+from prompt_toolkit.history import FileHistory
+from prompt_toolkit.patch_stdout import patch_stdout
 from rich.console import Console
 from rich.panel import Panel
 from rich.syntax import Syntax
@@ -35,6 +43,11 @@ from core.protocol import (
 
 
 _MAX_TOOL_OUTPUT_CHARS = 2000
+_HISTORY_PATH = Path.home() / ".monox" / "history"
+
+
+def _prompt_message() -> FormattedText:
+    return FormattedText([("class:prompt", "❯ ")])
 
 
 class TerminalChannel:
@@ -44,6 +57,11 @@ class TerminalChannel:
         self._stop = asyncio.Event()
         self._reader: asyncio.Task | None = None
         self.console = Console()
+        _HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
+        self._prompt_session = PromptSession(
+            history=FileHistory(str(_HISTORY_PATH)),
+            message=_prompt_message,
+        )
 
     async def start(self) -> None:
         self._reader = asyncio.create_task(self._read_loop())
@@ -54,12 +72,10 @@ class TerminalChannel:
             await self._reader
 
     async def _read_loop(self) -> None:
-        loop = asyncio.get_event_loop()
         while not self._stop.is_set():
             try:
-                text = await loop.run_in_executor(
-                    None, lambda: self.console.input("[bold blue]>[/bold blue] ")
-                )
+                with patch_stdout():
+                    text = await self._prompt_session.prompt_async()
             except (EOFError, KeyboardInterrupt):
                 self._stop.set()
                 break
