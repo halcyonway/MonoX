@@ -28,6 +28,7 @@ class OpenAIStreamProxy(LLMProxy):
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
+        options: dict[str, Any] | None = None,
     ) -> AsyncIterator[LlmChunk]:
         payload: dict[str, Any] = {
             "model": self._cfg.model,
@@ -36,6 +37,9 @@ class OpenAIStreamProxy(LLMProxy):
         }
         if tools:
             payload["tools"] = tools
+        # cfg.options 作默认值，调用方 options 覆盖
+        merged = {**(self._cfg.options or {}), **(options or {})}
+        payload.update(merged)
 
         async with self._client.stream("POST", "/chat/completions", json=payload) as resp:
             resp.raise_for_status()

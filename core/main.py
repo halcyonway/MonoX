@@ -9,7 +9,13 @@ from core.channel import TerminalChannel
 from core.config import Config, session_paths
 from core.gateway import Gateway
 from core.llm_proxy import OpenAIStreamProxy
-from core.loop import BashTool, ReadToolResultBudgetTool, SkillLoadTool, ToolRegistry
+from core.loop import (
+    BashTool,
+    ReadToolResultBudgetTool,
+    SkillLoadTool,
+    ToolRegistry,
+    WaitIoTool,
+)
 from core.loop.checkpoint import JsonlCheckpointStore
 from core.loop.engine import LoopEngine
 from core.loop.skill_summary import SkillSummaryLoader
@@ -22,7 +28,9 @@ DEFAULT_SYSTEM = """You are MonoX, a coding agent. You run inside a sandboxed ba
 
 Plan briefly, then execute. Use bash for all I/O. Use skill_load to fetch details of a skill before invoking it.
 
-Tool results may be L1-compressed; if you see budget_id, call read_tool_result_budget(budget_id=...) for the full version."""
+Tool results may be L1-compressed; if you see budget_id, call read_tool_result_budget(budget_id=...) for the full version.
+
+When you are done with the current turn and ready to receive the next message, call wait_io. If the user sends a new message while you are mid-task, it will be appended to the conversation and you can keep going."""
 
 
 def build_channel(cfg: Config):
@@ -42,6 +50,7 @@ async def run(cfg_path: str) -> None:
         [
             BashTool(runner, paths["workspace"]),
             SkillLoadTool(Path(cfg.sandbox.skills_root)),
+            WaitIoTool(),
             budget_tool,
         ]
     )

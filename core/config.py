@@ -4,6 +4,8 @@
 """
 from __future__ import annotations
 
+import os
+import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -15,12 +17,27 @@ else:
     import tomli as tomllib  # type: ignore[import-not-found]
 
 
+_ENV_RE = re.compile(r"\$\{([^}]+)\}")
+
+
+def _expand_env(data: Any) -> Any:
+    """递归展开 string 里的 ${VAR} → os.environ[VAR]。未设置返回空串。"""
+    if isinstance(data, str):
+        return _ENV_RE.sub(lambda m: os.environ.get(m.group(1), ""), data)
+    if isinstance(data, dict):
+        return {k: _expand_env(v) for k, v in data.items()}
+    if isinstance(data, list):
+        return [_expand_env(v) for v in data]
+    return data
+
+
 @dataclass(frozen=True)
 class LLMConfig:
     api_base: str = ""
     api_key: str = ""
     model: str = "gpt-4"
     timeout: int = 60
+    options: dict[str, Any] = field(default_factory=dict)  # 默认 sampling 参数
 
 
 @dataclass(frozen=True)
@@ -48,7 +65,7 @@ class Config:
     @classmethod
     def load(cls, path: str | Path) -> "Config":
         with open(path, "rb") as f:
-            return cls.from_dict(tomllib.load(f))
+            return cls.from_dict(_expand_env(tomllib.load(f)))
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Config":

@@ -1,7 +1,13 @@
 """ReAct 主循环 + 状态机。
 
-状态：idle → thinking → tooling → ... → idle → done
-v0 wait_io 通过 inbound.interrupt 触发（cancel 当前 react）。
+react 结束条件（满足任一即退出）：
+1. agent 主动调用 wait_io tool → 等待外部输入
+2. agent 完成（final message）且 input_queue 无新事件 → 等待外部输入
+3. 达到 max_steps
+
+agent 完成但有新的用户消息 → aggregate 进 context，继续 react（不退出）。
+
+input_queue 始终由 Gateway 写入；engine 内部 drain 不到东西 = 没新事件。
 """
 from __future__ import annotations
 
@@ -10,11 +16,7 @@ import json
 import time
 from typing import Any
 
-from core.loop.context import (
-    assemble_messages,
-    compress_tool_result,
-    format_tool_message,
-)
+from core.loop.context import assemble_messages, format_tool_message
 from core.loop.metric import SessionMetric, StepMetric
 from core.loop.tool_registry import ToolRegistry
 from core.loop.tools.read_tr_budget import ReadToolResultBudgetTool
@@ -33,6 +35,9 @@ from core.protocol import (
     ToolResult,
     ToolStart,
 )
+
+
+WAIT_IO_NAME = "wait_io"
 
 
 class LoopEngine:
@@ -72,13 +77,10 @@ class LoopEngine:
 
         while True:
             ev = await input_queue.get()
-            if ev.kind == "interrupt":
-                continue
-
             self._messages.append({"role": "user", "content": ev.text})
             await output_queue.put(StatusChange(state="thinking"))
 
-            final_text = await self._react(output_queue)
+            final_text = await self._react(input_queue, output_queue)
 
             await output_queue.put(
                 FinalMessage(text=final_text, metrics=self._session_metric.snapshot())
@@ -91,7 +93,11 @@ class LoopEngine:
         self._messages = list(ck.messages)
         self._step_idx = ck.step_idx + 1
 
-    async def _react(self, output_queue: asyncio.Queue[StreamEvent]) -> str:
+    async def _react(
+        self,
+        input_queue: asyncio.Queue[InboundEvent],
+        output_queue: asyncio.Queue[StreamEvent],
+    ) -> str:
         final_text = ""
 
         for _ in range(self._max_steps):
@@ -99,6 +105,11 @@ class LoopEngine:
             step_metric = StepMetric(step_idx=self._step_idx)
             t0 = time.monotonic()
 
+            # 1) drain input_queue → aggregate 新 user 消息
+            for ev in _drain(input_queue):
+                self._messages.append({"role": "user", "content": ev.text})
+
+            # 2) assemble + LLM stream
             memory_index = await self._memory.read_index(self._session_key)
             messages = assemble_messages(
                 self._system, memory_index, self._skill_summary, self._messages
@@ -125,18 +136,30 @@ class LoopEngine:
             step_metric.latency_ms = int((time.monotonic() - t0) * 1000)
             step_metric.tokens = usage
 
+            # 3) final message 分支（agent 没调 tool 或 finish_reason=stop）
             if not tool_calls or finish_reason == "stop":
                 self._messages.append({"role": "assistant", "content": full_text})
                 final_text = full_text
                 self._session_metric.add(step_metric)
-                await output_queue.put(StatusChange(state="idle"))
-                return final_text
 
+                # 检查 input_queue 还有没有新事件
+                pending = _drain(input_queue)
+                if not pending:
+                    # 4a) 没新事件 → wait_io，react 结束
+                    await output_queue.put(StatusChange(state="wait_io"))
+                    return final_text
+                # 4b) 有新事件 → aggregate，继续 react
+                for ev in pending:
+                    self._messages.append({"role": "user", "content": ev.text})
+                continue
+
+            # 5) tool dispatch
             self._messages.append(
                 {"role": "assistant", "content": full_text or None, "tool_calls": tool_calls}
             )
             await output_queue.put(StatusChange(state="tooling"))
 
+            has_wait_io = False
             for tc in tool_calls:
                 call_id = tc.get("id", "")
                 name = tc.get("function", {}).get("name", "")
@@ -144,6 +167,22 @@ class LoopEngine:
                 args = _safe_json(args_raw)
 
                 await output_queue.put(ToolStart(name=name, args=args))
+
+                if name == WAIT_IO_NAME:
+                    # wait_io: emit fake ok result，不真跑 tool
+                    result = await self._tools.get(name).execute(call_id, args) if self._tools.get(name) else ToolResult(
+                        call_id=call_id,
+                        status="ok",
+                        stdout="[wait_io] loop paused",
+                        stderr="",
+                        exit_code=0,
+                    )
+                    await output_queue.put(ToolEnd(name=name, result=result, latency_ms=0))
+                    self._messages.append(
+                        {"role": "tool", "tool_call_id": call_id, "content": format_tool_message(result)}
+                    )
+                    has_wait_io = True
+                    continue
 
                 tool = self._tools.get(name)
                 if tool is None:
@@ -160,7 +199,9 @@ class LoopEngine:
                     result = await tool.execute(call_id, args)
                     latency_ms = int((time.monotonic() - t0) * 1000)
 
-                result = compress_tool_result(result, self._budget_tool)
+                # TODO(v2): L1 压缩。compress_tool_result 已在 context.py 实现。
+                # v0 暂不调用，保留完整 tool_result；超过 token 阈值后再启用。
+                # result = compress_tool_result(result, self._budget_tool)
 
                 await output_queue.put(ToolEnd(name=name, result=result, latency_ms=latency_ms))
 
@@ -187,7 +228,22 @@ class LoopEngine:
                 )
             )
 
+            if has_wait_io:
+                # wait_io: react 结束，进入 wait_io 状态
+                await output_queue.put(StatusChange(state="wait_io"))
+                return final_text
+
         return "[max_steps reached]"
+
+
+def _drain(queue: asyncio.Queue[InboundEvent]) -> list[InboundEvent]:
+    """非阻塞拿出 queue 里所有 element。"""
+    out: list[InboundEvent] = []
+    while True:
+        try:
+            out.append(queue.get_nowait())
+        except asyncio.QueueEmpty:
+            return out
 
 
 def _safe_json(raw: Any) -> dict[str, Any]:

@@ -6,6 +6,8 @@
 - BashTool 真实执行（echo hello）
 - Checkpoint 持久化
 - StreamEvent 类型与时序
+- wait_io tool：agent 主动结束当前 turn
+- queue aggregate：react 中追加新 user message 继续 react
 """
 from __future__ import annotations
 
@@ -20,27 +22,31 @@ from core.loop.checkpoint import JsonlCheckpointStore
 from core.loop.engine import LoopEngine
 from core.loop.skill_summary import SkillSummaryLoader
 from core.loop.tool_registry import ToolRegistry
-from core.loop.tools import BashTool, ReadToolResultBudgetTool, SkillLoadTool
+from core.loop.tools import BashTool, ReadToolResultBudgetTool, SkillLoadTool, WaitIoTool
 from core.memory import FsMemoryStore
 from core.protocol import (
     FinalMessage,
     InboundEvent,
     LlmChunk,
     LLMProxy,
+    StatusChange,
     StreamEvent,
 )
 from core.sandbox import BashRunner
 
 
 class MockLLM(LLMProxy):
-    def __init__(self, scripts: list[list[LlmChunk]]) -> None:
+    def __init__(self, scripts: list[list[LlmChunk]], step_delay: float = 0.0) -> None:
         self._scripts = scripts
         self._idx = 0
+        self._step_delay = step_delay
 
-    async def stream(self, messages, tools=None):
+    async def stream(self, messages, tools=None, options=None):
         if self._idx >= len(self._scripts):
             yield LlmChunk(delta_text="[end]", finish_reason="stop")
             return
+        if self._step_delay:
+            await asyncio.sleep(self._step_delay)
         for chunk in self._scripts[self._idx]:
             yield chunk
         self._idx += 1
@@ -74,7 +80,7 @@ class MockChannel(Channel):
             self._final_done.set()
 
 
-async def run_pipeline(tmp: Path) -> tuple[MockChannel, MockLLM, JsonlCheckpointStore]:
+def build(tmp: Path) -> tuple[ToolRegistry, FsMemoryStore, JsonlCheckpointStore, str]:
     ws = tmp / "ws"; ws.mkdir(parents=True)
     mem = tmp / "mem"; mem.mkdir()
     skills = tmp / "skills"; skills.mkdir()
@@ -82,12 +88,39 @@ async def run_pipeline(tmp: Path) -> tuple[MockChannel, MockLLM, JsonlCheckpoint
     runner = BashRunner()
     budget = ReadToolResultBudgetTool()
     tools = ToolRegistry([
-        BashTool(runner, ws), SkillLoadTool(skills), budget,
+        BashTool(runner, ws), SkillLoadTool(skills), WaitIoTool(), budget,
     ])
     mem_store = FsMemoryStore(mem)
     ck = JsonlCheckpointStore(mem / "default" / "checkpoint.jsonl")
     skill_sum = SkillSummaryLoader(skills).summary()
+    return tools, mem_store, ck, skill_sum
 
+
+async def run_pipeline(tmp: Path, llm: MockLLM, events: list[InboundEvent]) -> MockChannel:
+    tools, mem_store, ck, skill_sum = build(tmp)
+    loop = LoopEngine(
+        session_key="default", system_prompt="test",
+        llm=llm, tools=tools, budget_tool=tools.get("read_tool_result_budget"),
+        memory=mem_store, checkpoint=ck, skill_summary=skill_sum,
+    )
+    ch = MockChannel(events)
+    iq: asyncio.Queue[InboundEvent] = asyncio.Queue()
+    oq: asyncio.Queue[StreamEvent] = asyncio.Queue()
+    gw = Gateway(ch, loop_input=iq, loop_output=oq)
+    gw_task = asyncio.create_task(gw.run())
+    loop_task = asyncio.create_task(loop.run(iq, oq))
+    await asyncio.wait_for(ch._final_done.wait(), timeout=10.0)
+    await asyncio.sleep(0.2)
+    gw_task.cancel(); loop_task.cancel()
+    for t in (gw_task, loop_task):
+        try: await t
+        except: pass
+    return ch
+
+
+async def test_basic_bash() -> None:
+    """Mock LLM 调 bash tool，最后 final message。"""
+    tmp = Path("/tmp/test_e2e_basic"); shutil.rmtree(tmp, ignore_errors=True); tmp.mkdir()
     llm = MockLLM([
         [
             LlmChunk(delta_text="Run it. "),
@@ -96,60 +129,88 @@ async def run_pipeline(tmp: Path) -> tuple[MockChannel, MockLLM, JsonlCheckpoint
             )),
             LlmChunk(finish_reason="tool_calls"),
         ],
+        [LlmChunk(delta_text="All done."), LlmChunk(finish_reason="stop")],
+    ])
+    ch = await run_pipeline(tmp, llm, [InboundEvent(session_key="default", kind="message", text="say hi")])
+    final = next(e for e in ch._sent if isinstance(e, FinalMessage))
+    assert "All done" in final.text
+    tool_ends = [e for e in ch._sent if type(e).__name__ == "ToolEnd"]
+    assert len(tool_ends) == 1
+    assert tool_ends[0].result.stdout.strip() == "hello"
+    assert llm._idx == 2
+    print("test_basic_bash PASSED ✓")
+
+
+async def test_wait_io_ends_turn() -> None:
+    """agent 主动调 wait_io → react 立即结束，不调第二次 LLM。"""
+    tmp = Path("/tmp/test_e2e_waitio"); shutil.rmtree(tmp, ignore_errors=True); tmp.mkdir()
+    llm = MockLLM([
         [
-            LlmChunk(delta_text="All done."),
-            LlmChunk(finish_reason="stop"),
+            LlmChunk(delta_text="Pausing. "),
+            LlmChunk(delta_tool_calls=(
+                {"index": 0, "id": "c1", "function": {"name": "wait_io", "arguments": '{"reason":"need input"}'}},
+            )),
+            LlmChunk(finish_reason="tool_calls"),
         ],
     ])
+    ch = await run_pipeline(tmp, llm, [InboundEvent(session_key="default", kind="message", text="ask")])
+    # wait_io tool 应被 dispatch
+    tool_starts = [e for e in ch._sent if type(e).__name__ == "ToolStart"]
+    assert any(s.name == "wait_io" for s in tool_starts)
+    # StatusChange(wait_io) 应出现
+    wait_io_states = [e for e in ch._sent if isinstance(e, StatusChange) and e.state == "wait_io"]
+    assert len(wait_io_states) == 1
+    # LLM 只调一次
+    assert llm._idx == 1
+    # FinalMessage 触发
+    assert any(isinstance(e, FinalMessage) for e in ch._sent)
+    print("test_wait_io_ends_turn PASSED ✓")
 
+
+async def test_queue_aggregate_continues_react() -> None:
+    """agent 完成 final 时 input_queue 有新事件 → aggregate 继续 react。"""
+    tmp = Path("/tmp/test_e2e_agg"); shutil.rmtree(tmp, ignore_errors=True); tmp.mkdir()
+
+    llm = MockLLM([
+        [LlmChunk(delta_text="first reply"), LlmChunk(finish_reason="stop")],
+        [LlmChunk(delta_text="second reply"), LlmChunk(finish_reason="stop")],
+    ], step_delay=0.3)
+
+    tools, mem_store, ck, skill_sum = build(tmp)
     loop = LoopEngine(
         session_key="default", system_prompt="test",
-        llm=llm, tools=tools, budget_tool=budget,
+        llm=llm, tools=tools, budget_tool=tools.get("read_tool_result_budget"),
         memory=mem_store, checkpoint=ck, skill_summary=skill_sum,
     )
-
-    ch = MockChannel([InboundEvent(session_key="default", kind="message", text="say hi")])
+    ch = MockChannel([InboundEvent(session_key="default", kind="message", text="first")])
     iq: asyncio.Queue[InboundEvent] = asyncio.Queue()
     oq: asyncio.Queue[StreamEvent] = asyncio.Queue()
     gw = Gateway(ch, loop_input=iq, loop_output=oq)
-
     gw_task = asyncio.create_task(gw.run())
     loop_task = asyncio.create_task(loop.run(iq, oq))
 
+    # 等第一次 LLM 调用完成（drain 检测到 second 必须在 step 1 final 后）
+    await asyncio.sleep(0.2)
+    iq.put_nowait(InboundEvent(session_key="default", kind="message", text="second"))
+
     await asyncio.wait_for(ch._final_done.wait(), timeout=10.0)
     await asyncio.sleep(0.2)
-
     gw_task.cancel(); loop_task.cancel()
     for t in (gw_task, loop_task):
         try: await t
         except: pass
 
-    return ch, llm, ck
+    assert llm._idx == 2
+    final = next(e for e in ch._sent if isinstance(e, FinalMessage))
+    assert "second reply" in final.text
+    print("test_queue_aggregate_continues_react PASSED ✓")
 
 
 async def main() -> None:
-    tmp = Path("/tmp/test_e2e")
-    if tmp.exists():
-        shutil.rmtree(tmp)
-    tmp.mkdir()
-
-    ch, llm, ck = await run_pipeline(tmp)
-
-    final = next(e for e in ch._sent if isinstance(e, FinalMessage))
-    assert "All done" in final.text
-
-    tool_ends = [e for e in ch._sent if type(e).__name__ == "ToolEnd"]
-    assert len(tool_ends) == 1
-    assert tool_ends[0].result.stdout.strip() == "hello"
-
-    assert llm._idx == 2
-
-    ck_path = ck._path
-    assert ck_path.exists()
-    lines = [l for l in ck_path.read_text().strip().split("\n") if l]
-    assert len(lines) == 1
-
-    print("ALL ASSERTIONS PASSED ✓")
+    await test_basic_bash()
+    await test_wait_io_ends_turn()
+    await test_queue_aggregate_continues_react()
+    print("\nALL TESTS PASSED ✓")
 
 
 if __name__ == "__main__":

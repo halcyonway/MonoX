@@ -1,0 +1,75 @@
+# MonoX configuration example
+# 复制为 config.toml 后按需修改。
+# 路径：core/main.py 默认读取 ./config.toml，也可用命令行参数指定。
+
+# ============================================================
+# Session
+# ============================================================
+# session 是 loop / memory / checkpoint 的隔离维度。
+# 当前固定为 "default"（多 session 通过 interface 预留）。
+session_key = "default"
+
+
+# ============================================================
+# [llm] LLMProxy 配置
+# ============================================================
+# v0: 只调一个模型。harness (retry/fallback/rate-limit) 后续在 LLMProxy 内部加。
+# api_key 支持 tomli/tomllib 的环境变量插值：${OPENAI_API_KEY}
+[llm]
+api_base = "https://api.openai.com/v1"
+api_key = "${OPENAI_API_KEY}"
+model = "gpt-4"
+timeout = 60
+# 透传到 LLM API 的默认 sampling 参数（可选，harness 层使用）
+# temperature = 0.7
+# max_tokens = 4096
+
+
+# ============================================================
+# [channel] Channel adapter
+# ============================================================
+# kind: terminal | feishu | slack
+# options: 由各 adapter 自行解析，core 不耦合具体 schema
+[channel]
+kind = "terminal"
+
+# [channel.options]
+# 飞书示例：
+# app_id = "cli_xxx"
+# app_secret = "xxx"
+
+
+# ============================================================
+# [sandbox] 文件系统路径
+# ============================================================
+# 所有路径在 docker 容器内。docker-compose.yml 已挂载对应 host 目录。
+[sandbox]
+workspace_root = "/var/agent/workspace"   # session 工作目录（基于 session_key 自动加子目录）
+memory_root    = "/var/agent/memory"      # Memory.md + notes/ 根目录
+skills_root    = "/var/agent/skills"      # skill 定义目录（共享，不按 session 隔离）
+tmp_root       = "/var/agent/tmp"         # 临时文件
+
+
+# ============================================================
+# [safety] 敏感操作检测（v0 stub，harness 后续启用）
+# ============================================================
+# bash tool 在 execute 前会检查 dangerous_patterns。
+# 命中后返回 status="awaiting_human" ToolResult，agent 自行决定下一步。
+# [safety]
+# enabled = false
+# dangerous_patterns = [
+#     "rm -rf",
+#     "mkfs",
+#     "dd if=",
+#     "kubectl delete",
+#     "docker rm",
+#     "git push --force",
+# ]
+
+
+# ============================================================
+# [loop] Loop engine 调参（可选）
+# ============================================================
+# [loop]
+# max_steps = 30                  # 单次 react 最大 step 数
+# L1_truncate_len = 4000          # tool_result 截断阈值（暂未启用，预留）
