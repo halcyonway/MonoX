@@ -45,7 +45,10 @@ timeout = 60
 # ============================================================
 # [channel] Channel adapter
 # ============================================================
-# kind: terminal | feishu | slack
+# kind: terminal | textual | feishu | slack
+#   terminal: 单行 prompt + 流式输出（Rich + prompt_toolkit）—— 简单可靠
+#   textual:  全屏 TUI（Textual），scrollable chat history + Markdown render
+#             适合长对话、流式 Markdown、需要看 reasoning / tool 输出
 # options: 由各 adapter 自行解析，core 不耦合具体 schema
 [channel]
 kind = "terminal"
@@ -54,6 +57,10 @@ kind = "terminal"
 # 飞书示例：
 # app_id = "cli_xxx"
 # app_secret = "xxx"
+
+# textual 选项（kind = "textual" 时生效）：
+# topic = "default"  # 显示在顶部 header 上
+# 运行时按 F12 切 debug 面板；初始可见性由 --debug flag 控制
 
 
 # ============================================================

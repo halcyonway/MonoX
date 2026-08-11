@@ -28,7 +28,7 @@ from core.loop.skill_summary import SkillSummaryLoader
 from core.memory import FsMemoryStore
 from core.protocol import InboundEvent, StreamEvent
 from core.sandbox import BashRunner
-from extensions.channels import TerminalChannel
+from extensions.channels import TerminalChannel, TextualChannel
 
 
 DEFAULT_SYSTEM = """You are MonoX, a coding agent. You run inside a sandboxed bash environment.
@@ -59,6 +59,12 @@ def parse_args() -> argparse.Namespace:
 def build_channel(cfg: Config, debug: bool) -> Channel:
     if cfg.channel.kind == "terminal":
         return TerminalChannel(cfg.session_key, debug=debug)
+    if cfg.channel.kind == "textual":
+        return TextualChannel(
+            session_key=cfg.session_key,
+            debug=debug,
+            options=cfg.channel.options,
+        )
     raise NotImplementedError(f"channel kind not implemented: {cfg.channel.kind}")
 
 
