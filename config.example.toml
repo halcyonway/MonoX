@@ -1,29 +1,12 @@
 # MonoX configuration example
-# 复制为 config.toml 后按需修改。
-# 路径：core/main.py 默认读取 ./config.toml，也可用命令行参数指定。
+# Copy to config.toml and edit.
 
-# ============================================================
-# Session
-# ============================================================
-# session 是 loop / memory / checkpoint 的隔离维度。
-# 当前固定为 "default"（多 session 通过 interface 预留）。
 session_key = "default"
 
+# channels_default: default target channel when agent output has no <send> tag.
+# MUST be defined before [llm] section (TOML requirement).
+channels_default = "feishu"
 
-# ============================================================
-# [llm] LLMProxy 配置
-# ============================================================
-# v0: 只调一个模型。harness (retry/fallback/rate-limit) 后续在 LLMProxy 内部加。
-# 协议：OpenAI-compatible stream (SSE: "data: {...}\n\n")，不依赖 openai sdk，纯 httpx。
-# api_key 支持环境变量插值：${VAR_NAME}。
-# 切换第三方 API：改 api_base / api_key / model 三个字段。
-#
-# 示例：
-#   DeepSeek:   api_base = "https://api.deepseek.com/v1",     model = "deepseek-chat"
-#   Moonshot:   api_base = "https://api.moonshot.cn/v1",      model = "moonshot-v1-8k"
-#   硅基流动:   api_base = "https://api.siliconflow.cn/v1",   model = "Qwen/Qwen2.5-72B-Instruct"
-#   MiniMax:    api_base = "https://api.minimaxi.com/v1",     model = "MiniMax-M2.7"
-#   自建 proxy: api_base = "http://your-proxy:8000/v1",       model = "your-model"
 [llm]
 api_base = "https://api.openai.com/v1"
 api_key = "${OPENAI_API_KEY}"
@@ -31,70 +14,50 @@ model = "gpt-4"
 timeout = 60
 
 # [llm.options]
-# 默认 sampling 参数（温度 / top_p / 最大 token 等）
 # temperature = 0.7
 # max_tokens = 4096
 
 # [llm.extra_params]
-# 模型特定参数，原样透传到 API。例：
-#   MiniMax / DeepSeek-R1 等 reasoning 模型加 reasoning_split = true
-# Anthropic prompt caching 加 cache_control 等
 # reasoning_split = true
 
+# ============================================================
+# [[channels]] multi-channel configuration
+# ============================================================
+# New format, takes priority over [channel] single-channel config.
+# channels_default must appear before [llm] (TOML requirement).
+# Per-channel config lives in [channels.<kind>] sub-table.
 
-# ============================================================
-# [channel] Channel adapter
-# ============================================================
-# kind: terminal | textual | feishu | slack
-#   terminal: 单行 prompt + 流式输出（Rich + prompt_toolkit）—— 简单可靠
-#   textual:  全屏 TUI（Textual），scrollable chat history + Markdown render
-#             适合长对话、流式 Markdown、需要看 reasoning / tool 输出
-# options: 由各 adapter 自行解析，core 不耦合具体 schema
-[channel]
+# Single channel example:
+# [[channels]]
+# kind = "terminal"
+
+# Multi-channel example (terminal for input + feishu for output):
+# [[channels]]
+# kind = "terminal"
+#
+# [[channels]]
+# kind = "feishu"
+# [channels.feishu]
+# app_id     = "cli_xxxxxxxxxxxxxxxx"
+# app_secret = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+# allowed_chats = []
+
+[[channels]]
 kind = "terminal"
 
-# [channel.options]
-# 飞书示例：
-# app_id = "cli_xxx"
-# app_secret = "xxx"
+[[channels]]
+kind = "feishu"
 
-# textual 选项（kind = "textual" 时生效）：
-# topic = "default"  # 显示在顶部 header 上
-# 运行时按 F12 切 debug 面板；初始可见性由 --debug flag 控制
-
+[channels.feishu]
+app_id     = "cli_xxxxxxxxxxxxxxxx"
+app_secret = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+allowed_chats = []
 
 # ============================================================
-# [sandbox] 文件系统路径
+# [sandbox] file system paths
 # ============================================================
-# 默认相对当前目录，本地开箱即用。docker 部署时改成容器内绝对路径（如 /var/agent/...）。
-# 第一次跑前先执行 scripts/install.sh 建 .monox 目录结构。
 [sandbox]
-workspace_root = "./.monox/workspace"   # session 工作目录（基于 session_key 自动加子目录）
-memory_root    = "./.monox/memory"      # Memory.md + notes/ 根目录
-skills_root    = "./.monox/skills"      # skill 定义目录（共享，不按 session 隔离）
-tmp_root       = "./.monox/tmp"         # 临时文件
-
-
-# ============================================================
-# [safety] 敏感操作检测（v0 stub，harness 后续启用）
-# ============================================================
-# bash tool 在 execute 前会检查 dangerous_patterns。
-# 命中后返回 status="awaiting_human" ToolResult，agent 自行决定下一步。
-# [safety]
-# enabled = false
-# dangerous_patterns = [
-#     "rm -rf",
-#     "mkfs",
-#     "dd if=",
-#     "kubectl delete",
-#     "docker rm",
-#     "git push --force",
-# ]
-
-
-# ============================================================
-# [loop] Loop engine 调参（可选）
-# ============================================================
-# [loop]
-# max_steps = 30                  # 单次 react 最大 step 数
-# L1_truncate_len = 4000          # tool_result 截断阈值（暂未启用，预留）
+workspace_root = "./.monox/workspace"
+memory_root    = "./.monox/memory"
+skills_root    = "./.monox/skills"
+tmp_root       = "./.monox/tmp"

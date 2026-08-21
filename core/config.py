@@ -43,9 +43,19 @@ class LLMConfig:
 
 @dataclass(frozen=True)
 class ChannelConfig:
-    """channel.options 由各 adapter 自行解析，core 不耦合具体 channel schema。"""
+    """channel.options 由各 adapter 自行解析，core 不耦合具体 channel schema。
+    channel_raw 保留原始 channel dict（含 [channel.feishu] 等子表）。
+    """
     kind: str = "terminal"
     options: dict[str, Any] = field(default_factory=dict)
+    channel_raw: dict[str, Any] = field(default_factory=dict)  # 包含 feishu 等子表
+
+
+@dataclass(frozen=True)
+class MultiChannelConfig:
+    """多 channel 配置，支持 [[channels]] 列表格式。"""
+    channels: list[ChannelConfig] = field(default_factory=list)
+    default_channel: str = "terminal"  # 无 <send> 标签时默认发到这个 channel
 
 
 @dataclass(frozen=True)
@@ -62,6 +72,7 @@ class Config:
     llm: LLMConfig = field(default_factory=LLMConfig)
     channel: ChannelConfig = field(default_factory=ChannelConfig)
     sandbox: SandboxConfig = field(default_factory=SandboxConfig)
+    multi_channel: MultiChannelConfig = field(default_factory=MultiChannelConfig)
 
     @classmethod
     def load(cls, path: str | Path) -> "Config":
@@ -71,6 +82,29 @@ class Config:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Config":
         llm_raw = data.get("llm", {})
+
+        # 解析 [[channels]]（新格式）
+        channel_list = data.get("channels", [])
+        multi_ch = MultiChannelConfig(
+            channels=[
+                ChannelConfig(
+                    kind=c.get("kind", "terminal"),
+                    options=c.get("options", {}),
+                    channel_raw=c,
+                )
+                for c in channel_list
+            ],
+            default_channel=data.get("channels_default", "terminal"),
+        )
+
+        # 解析 [channel]（旧格式，兼容单 channel）
+        ch_data = data.get("channel", {})
+        single_ch = ChannelConfig(
+            kind=ch_data.get("kind", "terminal"),
+            options=ch_data.get("options", {}),
+            channel_raw=ch_data,
+        )
+
         return cls(
             session_key=data.get("session_key", "default"),
             llm=LLMConfig(
@@ -81,11 +115,9 @@ class Config:
                 options=llm_raw.get("options", {}),
                 extra_params=llm_raw.get("extra_params", {}),
             ),
-            channel=ChannelConfig(
-                kind=data.get("channel", {}).get("kind", "terminal"),
-                options=data.get("channel", {}).get("options", {}),
-            ),
+            channel=single_ch,
             sandbox=SandboxConfig(**data.get("sandbox", {})),
+            multi_channel=multi_ch,
         )
 
 

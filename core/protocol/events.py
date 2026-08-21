@@ -24,6 +24,9 @@ class InboundEvent:
     session_key: str
     kind: Literal["message", "interrupt", "command", "attachment"]
     text: str
+    source: str = "default"           # 来源标识：channel 名或其他信号源
+    event_type: str = "user-input"   # 事件类型：user-input / scheduled-task / system-notify / command 等
+    timestamp: float = 0.0             # Unix 时间戳（秒，浮点）
     attachments: tuple[File, ...] = ()
     meta: dict[str, Any] = field(default_factory=dict)
 

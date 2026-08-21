@@ -31,6 +31,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+import time
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -172,7 +173,14 @@ class TerminalChannel:
                 self._stop.set()
                 break
             await self._queue.put(
-                InboundEvent(session_key=self._session_key, kind="message", text=text)
+                InboundEvent(
+                    session_key=self._session_key,
+                    kind="message",
+                    text=text,
+                    source="terminal",
+                    event_type="user-input",
+                    timestamp=time.time(),
+                )
             )
 
     async def listen(self) -> AsyncIterator[InboundEvent]:

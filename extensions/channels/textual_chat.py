@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from collections.abc import AsyncIterator
 
 from textual.app import App, Binding
@@ -526,7 +527,14 @@ class TextualChannel:
                 self._app.call_later(self._app.exit)
             return
         self._in_q.put_nowait(
-            InboundEvent(session_key=self._session_key, kind="message", text=text)
+            InboundEvent(
+                session_key=self._session_key,
+                kind="message",
+                text=text,
+                source="textual",
+                event_type="user-input",
+                timestamp=time.time(),
+            )
         )
 
 

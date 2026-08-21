@@ -2,31 +2,40 @@
 
 仓库设计 / 决策 / 进展的可追溯记录。
 
+## 文档导航
+
+| 文档 | 内容 |
+|---|---|
+| [OVERVIEW.md](./OVERVIEW.md) | 整体架构说明，模块关系，数据流 |
+| [rule.md](./rule.md) | 开发规范 + 踩坑记录 |
+| [goal.md](./goal.md) | 长期目标 |
+| [requirements/](./requirements/) | 尚未实现的需求方案 |
+
+## 快速入口
+
+- **新需求**：看 `requirements/` 下的需求文档，了解设计背景和方案
+- **改 core 前**：先看 `rule.md`，确认是否属于 core 稳定 API
+- **了解 MonoX**：先读 [OVERVIEW.md](./OVERVIEW.md)
+- **追溯改动**：`git log` 找 SHA，然后 `cat spec/commits/<sha>.md`
+
 ## 目录结构
 
 ```
 spec/
-├── README.md          # 本文件（导航）
-├── rule.md            # 项目规则：架构分层 + 注释原则
-├── goal.md            # 长期目标
-├── requirements/      # 规划中尚未实现的需求方案
-│   ├── shutdown.md    # engine 响应 channel 关闭
-│   ├── context-compression.md   # L0/L1/L2 上下文压缩
-│   ├── memory.md      # 长期记忆 / Memory.md 维护策略
-│   ├── hitl.md        # 敏感操作人工确认
-│   ├── feishu-channel.md
-│   └── llm-harness.md # LLMProxy retry/fallback/rate-limit
-└── commits/           # 每个 git commit 的总结（按 SHA 划分）
-    ├── 2fbf99d.md     # initial scaffold
-    ├── a4e817a.md     # v0.1 full runtime
-    └── ...
+├── README.md              # 本文件（导航）
+├── OVERVIEW.md            # 整体架构说明
+├── rule.md                # 项目规则：架构分层 + 注释原则
+├── goal.md                # 长期目标
+├── requirements/          # 规划中尚未实现的需求方案
+│   ├── event-wrapper.md      # 外部信号统一包装协议
+│   ├── multi-channel.md      # 多通道并行接入
+│   ├── feishu-channel.md     # 飞书接入
+│   ├── context-compression.md # L0/L1/L2 上下文压缩
+│   ├── memory.md             # 长期记忆 / Memory.md 维护策略
+│   ├── hitl.md              # 敏感操作人工确认
+│   └── llm-harness.md       # LLMProxy retry/fallback/rate-limit
+└── commits/               # 每个 git commit 的总结（按 SHA 划分）
 ```
-
-## 怎么用
-
-- **改 core 前**：先看 `rule.md`，确认这次改动确实属于 core 的稳定 API，不只是 adapter 的事
-- **新需求**：先在 `requirements/` 起一份方案文档；实现时再写 commits/ 对应的 commit summary
-- **追溯某次改动**：`git log` 找 SHA，然后 `cat spec/commits/<sha>.md`
 
 ## 历史 spec 文件
 
