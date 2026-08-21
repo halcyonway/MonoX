@@ -33,3 +33,7 @@ class MemoryStore(Protocol):
     async def update_index(self, session_key: str, content: str) -> None:
         """整体替换 Memory.md。"""
         ...
+
+    async def append_fact(self, session_key: str, fact: str) -> None:
+        """向 Memory.md 追加一条事实/摘要条目（L3 自动维护）。"""
+        ...

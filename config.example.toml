@@ -20,6 +20,18 @@ timeout = 60
 # [llm.extra_params]
 # reasoning_split = true
 
+# [llm.custom]
+# your_custom_field = "value"
+
+# Required independent compression model (L2 conversation summarization).
+# 这里填占位值即可；可填主模型同款，或换一个更便宜的模型。
+# Missing fields fall back to the main [llm] values.
+[llm.compression]
+model = "your-compression-model"
+
+[llm.compression.options]
+temperature = 0.2
+
 # ============================================================
 # [[channels]] multi-channel configuration
 # ============================================================
@@ -52,6 +64,13 @@ kind = "feishu"
 app_id     = "cli_xxxxxxxxxxxxxxxx"
 app_secret = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 allowed_chats = []
+
+# Desktop client channel (MonoDesk) — WebSocket server for the desktop client:
+# [[channels]]
+# kind  = "monodesk"
+# host  = "127.0.0.1"
+# port  = 8765
+# model = "gpt-4"   # optional; echoed in the hello frame for the client's status bar
 
 # ============================================================
 # [sandbox] file system paths

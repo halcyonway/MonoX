@@ -10,7 +10,6 @@ from core.protocol import ToolResult
 
 
 L1_TRUNCATE_LEN = 4000
-L1_HALF = L1_TRUNCATE_LEN // 2
 
 
 def assemble_messages(
@@ -27,23 +26,31 @@ def assemble_messages(
     return [{"role": "system", "content": "".join(parts)}] + list(messages)
 
 
-def compress_tool_result(result: ToolResult, budget: ReadToolResultBudgetTool) -> ToolResult:
-    if len(result.stdout) <= L1_TRUNCATE_LEN and len(result.stderr) <= L1_TRUNCATE_LEN:
+def compress_tool_result(
+    result: ToolResult,
+    budget: ReadToolResultBudgetTool,
+    limit: int = L1_TRUNCATE_LEN,
+) -> ToolResult:
+    if len(result.stdout) <= limit and len(result.stderr) <= limit:
         return result
 
     budget_id = uuid.uuid4().hex[:12]
     budget.put(budget_id, result)
+    half = limit // 2
 
-    truncated_stdout = (
-        f"[L1 compressed, full version requires read_tool_result_budget(budget_id='{budget_id}')]\n"
-        f"{result.stdout[:L1_HALF]}\n...\n{result.stdout[-L1_HALF:]}"
-    )
+    def _truncate(text: str) -> str:
+        return (
+            f"[L1 compressed, full version requires read_tool_result_budget(budget_id='{budget_id}')]\n"
+            f"{text[:half]}\n...\n{text[-half:]}"
+        )
+
     return ToolResult(
         call_id=result.call_id,
         status=result.status,
-        stdout=truncated_stdout,
-        stderr=result.stderr,
+        stdout=_truncate(result.stdout) if len(result.stdout) > limit else result.stdout,
+        stderr=_truncate(result.stderr) if len(result.stderr) > limit else result.stderr,
         exit_code=result.exit_code,
+        artifacts=result.artifacts,
         truncated=True,
         budget_id=budget_id,
     )

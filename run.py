@@ -23,12 +23,20 @@ from core.loop import (
     WaitIoTool,
 )
 from core.loop.checkpoint import JsonlCheckpointStore
+from core.loop.compression import CompressionService
 from core.loop.engine import LoopEngine
 from core.loop.skill_summary import SkillSummaryLoader
 from core.memory import FsMemoryStore
 from core.protocol import InboundEvent, StreamEvent
 from core.sandbox import BashRunner
-from extensions.channels import FeishuChannel, FeishuChannelConfig, TerminalChannel, TextualChannel
+from extensions.channels import (
+    FeishuChannel,
+    FeishuChannelConfig,
+    MonoDeskChannel,
+    MonoDeskChannelConfig,
+    TerminalChannel,
+    TextualChannel,
+)
 
 
 DEFAULT_SYSTEM = """You are MonoX, a coding agent. You run inside a sandboxed bash environment.
@@ -76,6 +84,15 @@ def build_channel(cfg: Config, debug: bool) -> Channel:
             ),
             session_key=cfg.session_key,
         )
+    if cfg.channel.kind == "monodesk":
+        return MonoDeskChannel(
+            MonoDeskChannelConfig(
+                host=cfg.channel.channel_raw.get("host", "127.0.0.1"),
+                port=cfg.channel.channel_raw.get("port", 8765),
+                model=cfg.channel.channel_raw.get("model", ""),
+            ),
+            session_key=cfg.session_key,
+        )
     raise NotImplementedError(f"channel kind not implemented: {cfg.channel.kind}")
 
 
@@ -100,6 +117,15 @@ def _build_one_channel(
                 app_id=channel_raw.get("app_id", ""),
                 app_secret=channel_raw.get("app_secret", ""),
                 allowed_chats=channel_raw.get("allowed_chats", []),
+            ),
+            session_key=session_key,
+        )
+    if kind == "monodesk":
+        return MonoDeskChannel(
+            MonoDeskChannelConfig(
+                host=channel_raw.get("host", "127.0.0.1"),
+                port=channel_raw.get("port", 8765),
+                model=channel_raw.get("model", ""),
             ),
             session_key=session_key,
         )
@@ -148,14 +174,27 @@ async def run(cfg_path: str, debug: bool, session_key: str | None) -> None:
     memory = FsMemoryStore(Path(cfg.sandbox.memory_root))
     checkpoint = JsonlCheckpointStore(paths["checkpoint"])
     skill_summary = SkillSummaryLoader(Path(cfg.sandbox.skills_root)).summary()
+    if cfg.compression_llm is None:
+        raise RuntimeError(
+            "missing [llm.compression]: a compression model is required; "
+            "configure it in config.toml"
+        )
+
     llm = OpenAIStreamProxy(cfg.llm)
+    compression_llm = OpenAIStreamProxy(cfg.compression_llm)
+
+    compression = CompressionService(
+        budget_tool=budget_tool,
+        llm=compression_llm,
+        memory=memory,
+    )
 
     loop = LoopEngine(
         session_key=cfg.session_key,
         system_prompt=DEFAULT_SYSTEM,
         llm=llm,
         tools=tools,
-        budget_tool=budget_tool,
+        compression=compression,
         memory=memory,
         checkpoint=checkpoint,
         skill_summary=skill_summary,

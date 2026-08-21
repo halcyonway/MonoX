@@ -15,5 +15,8 @@ workspace/
 memory/
 tmp/
 
+# core/memory is source code, not runtime data
+!core/memory/
+
 # local config — keep config.example.toml as template, ignore user's config.toml
 config.toml

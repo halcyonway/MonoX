@@ -41,8 +41,9 @@ class OpenAIStreamProxy(LLMProxy):
         if tools:
             payload["tools"] = tools
         # 合并顺序（后者覆盖前者）：
-        #   extra_params → cfg.options → 调用方 options
+        #   extra_params → custom → cfg.options → 调用方 options
         payload.update(self._cfg.extra_params)
+        payload.update(self._cfg.custom)
         payload.update(self._cfg.options)
         if options:
             payload.update(options)

@@ -16,6 +16,7 @@ import json
 import time
 from typing import Any
 
+from core.loop.compression import CompressionService
 from core.loop.context import assemble_messages, format_tool_message
 from core.loop.metric import SessionMetric, StepMetric
 from core.loop.tool_registry import ToolRegistry
@@ -49,7 +50,7 @@ class LoopEngine:
         system_prompt: str,
         llm: LLMProxy,
         tools: ToolRegistry,
-        budget_tool: ReadToolResultBudgetTool,
+        compression: CompressionService,
         memory: MemoryStore,
         checkpoint: CheckpointStore,
         skill_summary: str,
@@ -59,7 +60,7 @@ class LoopEngine:
         self._system = system_prompt
         self._llm = llm
         self._tools = tools
-        self._budget_tool = budget_tool
+        self._compression = compression
         self._memory = memory
         self._checkpoint = checkpoint
         self._skill_summary = skill_summary
@@ -109,7 +110,15 @@ class LoopEngine:
             for ev in _drain(input_queue):
                 self._messages.append({"role": "user", "content": ev.text})
 
-            # 2) assemble + LLM stream
+            # 2) L2 压缩（若需要）→ L3 落 Memory → assemble + LLM stream
+            if self._compression.should_compress(self._messages):
+                await output_queue.put(StatusChange(state="compressing"))
+
+            self._messages = await self._compression.maybe_summarize(
+                self._messages, self._session_key
+            )
+
+            # read_index 必须在 L2 之后，才能拿到刚写入 Memory 的 summary
             memory_index = await self._memory.read_index(self._session_key)
             messages = assemble_messages(
                 self._system, memory_index, self._skill_summary, self._messages
@@ -211,9 +220,9 @@ class LoopEngine:
                     result = await tool.execute(call_id, args)
                     latency_ms = int((time.monotonic() - t0) * 1000)
 
-                # TODO(v2): L1 压缩。compress_tool_result 已在 context.py 实现。
-                # v0 暂不调用，保留完整 tool_result；超过 token 阈值后再启用。
-                # result = compress_tool_result(result, self._budget_tool)
+                # read_tool_result_budget 返回的是完整原始结果，不能再截断
+                if name != ReadToolResultBudgetTool.name:
+                    result = self._compression.compress_tool_result(result)
 
                 await output_queue.put(ToolEnd(name=name, result=result, latency_ms=latency_ms))
 

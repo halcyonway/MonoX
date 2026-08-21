@@ -24,7 +24,7 @@ run.py          装配脚本（顶层，不属于 core 也不属于 extension）
 
 - 新 channel：实现 `Channel` Protocol，挂在 `extensions/channels/`，`run.py` 加一个 `kind`
 - 新 tool：`core.loop.tool_registry` 注册或 `extensions/skills/<name>/SKILL.md` skill 描述
-- 新 LLM API：改 `config.toml` 三个字段 + 必要时 `[llm.extra_params]` 透传；不改 core
+- 新 LLM API：改 `config.toml` 三个字段 + 必要时 `[llm.extra_params]` / `[llm.custom]` 透传；不改 core
 
 **装配在 `run.py`，不属于 core。**
 

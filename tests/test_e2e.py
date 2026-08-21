@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import shutil
 from pathlib import Path
 
@@ -19,6 +20,7 @@ from core.channel.base import Channel
 from core.gateway import Gateway
 from core.llm_proxy import OpenAIStreamProxy  # noqa: F401  验证 import
 from core.loop.checkpoint import JsonlCheckpointStore
+from core.loop.compression import CompressionService
 from core.loop.engine import LoopEngine
 from core.loop.skill_summary import SkillSummaryLoader
 from core.loop.tool_registry import ToolRegistry
@@ -97,11 +99,19 @@ def build(tmp: Path) -> tuple[ToolRegistry, FsMemoryStore, JsonlCheckpointStore,
     return tools, mem_store, ck, skill_sum
 
 
+def make_compression(tools: ToolRegistry, llm, mem_store: FsMemoryStore) -> CompressionService:
+    return CompressionService(
+        budget_tool=tools.get("read_tool_result_budget"),
+        llm=llm,
+        memory=mem_store,
+    )
+
+
 async def run_pipeline(tmp: Path, llm: MockLLM, events: list[InboundEvent]) -> MockChannel:
     tools, mem_store, ck, skill_sum = build(tmp)
     loop = LoopEngine(
         session_key="default", system_prompt="test",
-        llm=llm, tools=tools, budget_tool=tools.get("read_tool_result_budget"),
+        llm=llm, tools=tools, compression=make_compression(tools, llm, mem_store),
         memory=mem_store, checkpoint=ck, skill_summary=skill_sum,
     )
     ch = MockChannel(events)
@@ -180,7 +190,7 @@ async def test_queue_aggregate_continues_react() -> None:
     tools, mem_store, ck, skill_sum = build(tmp)
     loop = LoopEngine(
         session_key="default", system_prompt="test",
-        llm=llm, tools=tools, budget_tool=tools.get("read_tool_result_budget"),
+        llm=llm, tools=tools, compression=make_compression(tools, llm, mem_store),
         memory=mem_store, checkpoint=ck, skill_summary=skill_sum,
     )
     ch = MockChannel([InboundEvent(session_key="default", kind="message", text="first")])
@@ -237,9 +247,10 @@ async def test_chat_only_persists_across_restart() -> None:
             yield LlmChunk(delta_text="remembered", finish_reason="stop")
 
     tools, mem_store, ck, skill_sum = build(tmp)
+    capturing_llm = CapturingLLM()
     loop = LoopEngine(
         session_key="default", system_prompt="test",
-        llm=CapturingLLM(), tools=tools, budget_tool=tools.get("read_tool_result_budget"),
+        llm=capturing_llm, tools=tools, compression=make_compression(tools, capturing_llm, mem_store),
         memory=mem_store, checkpoint=ck, skill_summary=skill_sum,
     )
     ch2 = MockChannel([InboundEvent(session_key="default", kind="message", text="again")])
@@ -265,11 +276,105 @@ async def test_chat_only_persists_across_restart() -> None:
     print("test_chat_only_persists_across_restart PASSED ✓")
 
 
+async def test_l1_tool_result_truncated() -> None:
+    """bash 输出 5000 字符被 L1 截断，ToolEnd 带 budget_id。"""
+    tmp = Path("/tmp/test_e2e_l1"); shutil.rmtree(tmp, ignore_errors=True); tmp.mkdir()
+
+    cmd = "python3 -c \"print(chr(65)*5000)\""
+    llm = MockLLM([
+        [
+            LlmChunk(delta_text="Generate. "),
+            LlmChunk(delta_tool_calls=(
+                {
+                    "index": 0,
+                    "id": "c1",
+                    "function": {"name": "bash", "arguments": json.dumps({"cmd": cmd})},
+                },
+            )),
+            LlmChunk(finish_reason="tool_calls"),
+        ],
+        [LlmChunk(delta_text="Done."), LlmChunk(finish_reason="stop")],
+    ])
+
+    ch = await run_pipeline(tmp, llm, [InboundEvent(session_key="default", kind="message", text="run")])
+    tool_ends = [e for e in ch._sent if type(e).__name__ == "ToolEnd"]
+    assert len(tool_ends) == 1
+    result = tool_ends[0].result
+    assert result.truncated is True
+    assert result.budget_id is not None
+    assert len(result.stdout) < 5000
+    assert "read_tool_result_budget" in result.stdout
+    print("test_l1_tool_result_truncated PASSED ✓")
+
+
+async def test_l2_compression_folds_early_turns() -> None:
+    """多个 user turn 超过阈值触发 L2 摘要并折叠最早轮。"""
+    tmp = Path("/tmp/test_e2e_l2"); shutil.rmtree(tmp, ignore_errors=True); tmp.mkdir()
+
+    big = "x" * 10_000
+    events = [
+        InboundEvent(session_key="default", kind="message", text="first turn " + big),
+        InboundEvent(session_key="default", kind="message", text="second turn " + big),
+        InboundEvent(session_key="default", kind="message", text="third turn " + big),
+    ]
+
+    class L2LLM(LLMProxy):
+        def __init__(self) -> None:
+            self.summary_calls = 0
+
+        async def stream(self, messages, tools=None, options=None):
+            if tools is None:
+                self.summary_calls += 1
+                yield LlmChunk(delta_text="folded summary", finish_reason="stop")
+            else:
+                yield LlmChunk(delta_text="final answer", finish_reason="stop")
+
+    llm = L2LLM()
+    tools, mem_store, ck, skill_sum = build(tmp)
+    compression = CompressionService(
+        budget_tool=tools.get("read_tool_result_budget"),
+        llm=llm,
+        memory=mem_store,
+        l2_char_threshold=100,
+    )
+    loop = LoopEngine(
+        session_key="default", system_prompt="test",
+        llm=llm, tools=tools, compression=compression,
+        memory=mem_store, checkpoint=ck, skill_summary=skill_sum,
+    )
+    ch = MockChannel([])
+    iq: asyncio.Queue[InboundEvent] = asyncio.Queue()
+    oq: asyncio.Queue[StreamEvent] = asyncio.Queue()
+    for e in events:
+        iq.put_nowait(e)
+
+    gw = Gateway(ch, loop_input=iq, loop_output=oq)
+    gw_task = asyncio.create_task(gw.run())
+    loop_task = asyncio.create_task(loop.run(iq, oq))
+    await asyncio.wait_for(ch._final_done.wait(), timeout=10.0)
+    await asyncio.sleep(0.2)
+    gw_task.cancel(); loop_task.cancel()
+    for t in (gw_task, loop_task):
+        try: await t
+        except: pass
+
+    assert llm.summary_calls == 1
+    final = next(e for e in ch._sent if isinstance(e, FinalMessage))
+    assert "final answer" in final.text
+    assert any(isinstance(e, StatusChange) and e.state == "compressing" for e in ch._sent)
+    memory_md = tmp / "mem" / "default" / "Memory.md"
+    assert memory_md.exists()
+    assert "folded summary" in memory_md.read_text()
+    print("test_l2_compression_folds_early_turns PASSED ✓")
+
+
 async def main() -> None:
     await test_basic_bash()
     await test_wait_io_ends_turn()
     await test_queue_aggregate_continues_react()
     await test_chat_only_persists_across_restart()
+    await test_l1_tool_result_truncated()
+    await test_l2_compression_folds_early_turns()
     print("\nALL TESTS PASSED ✓")
 
 

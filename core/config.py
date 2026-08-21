@@ -39,6 +39,7 @@ class LLMConfig:
     timeout: int = 60
     options: dict[str, Any] = field(default_factory=dict)  # 默认 sampling 参数
     extra_params: dict[str, Any] = field(default_factory=dict)  # 模型特定参数（透传 API）
+    custom: dict[str, Any] = field(default_factory=dict)  # 自定义参数，透传 request body
 
 
 @dataclass(frozen=True)
@@ -70,6 +71,7 @@ class SandboxConfig:
 class Config:
     session_key: str = "default"
     llm: LLMConfig = field(default_factory=LLMConfig)
+    compression_llm: LLMConfig | None = None  # 独立压缩模型；run 启动校验必填
     channel: ChannelConfig = field(default_factory=ChannelConfig)
     sandbox: SandboxConfig = field(default_factory=SandboxConfig)
     multi_channel: MultiChannelConfig = field(default_factory=MultiChannelConfig)
@@ -105,16 +107,34 @@ class Config:
             channel_raw=ch_data,
         )
 
+        llm = LLMConfig(
+            api_base=llm_raw.get("api_base", ""),
+            api_key=llm_raw.get("api_key", ""),
+            model=llm_raw.get("model", "gpt-4"),
+            timeout=llm_raw.get("timeout", 60),
+            options=llm_raw.get("options", {}),
+            extra_params=llm_raw.get("extra_params", {}),
+            custom=llm_raw.get("custom", {}),
+        )
+
+        # 独立压缩模型：未配置的字段回退到主 llm
+        comp_raw = llm_raw.get("compression")
+        compression_llm = None
+        if comp_raw:
+            compression_llm = LLMConfig(
+                api_base=comp_raw.get("api_base", llm.api_base),
+                api_key=comp_raw.get("api_key", llm.api_key),
+                model=comp_raw.get("model", llm.model),
+                timeout=comp_raw.get("timeout", llm.timeout),
+                options=comp_raw.get("options", llm.options),
+                extra_params=comp_raw.get("extra_params", llm.extra_params),
+                custom=comp_raw.get("custom", llm.custom),
+            )
+
         return cls(
             session_key=data.get("session_key", "default"),
-            llm=LLMConfig(
-                api_base=llm_raw.get("api_base", ""),
-                api_key=llm_raw.get("api_key", ""),
-                model=llm_raw.get("model", "gpt-4"),
-                timeout=llm_raw.get("timeout", 60),
-                options=llm_raw.get("options", {}),
-                extra_params=llm_raw.get("extra_params", {}),
-            ),
+            llm=llm,
+            compression_llm=compression_llm,
             channel=single_ch,
             sandbox=SandboxConfig(**data.get("sandbox", {})),
             multi_channel=multi_ch,
