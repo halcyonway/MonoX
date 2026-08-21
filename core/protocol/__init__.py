@@ -17,6 +17,7 @@ from .events import (
     File,
 )
 from .llm import LLMProxy
+from .sandbox import SandboxResult, SandboxRunner
 from .storage import CheckpointStore, MemoryStore
 from .tools import Tool
 
@@ -38,6 +39,8 @@ __all__ = [
     "CheckpointRecord",
     "File",
     "LLMProxy",
+    "SandboxResult",
+    "SandboxRunner",
     "CheckpointStore",
     "MemoryStore",
     "Tool",

@@ -1,19 +1,16 @@
-"""BashRunner: subprocess 后端。未来可换 docker exec / ssh 实现，protocol 不变。"""
+"""BashRunner: subprocess 后端，实现 SandboxRunner Protocol。
+
+未来可换 docker exec / ssh 实现，协议不变。
+"""
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
 from pathlib import Path
 
-
-@dataclass(frozen=True)
-class BashResult:
-    stdout: str
-    stderr: str
-    exit_code: int
+from core.protocol import SandboxResult, SandboxRunner
 
 
-class BashRunner:
+class BashRunner(SandboxRunner):
     async def run(
         self,
         cmd: str,
@@ -21,7 +18,7 @@ class BashRunner:
         cwd: Path | None = None,
         timeout: int = 30,
         env: dict[str, str] | None = None,
-    ) -> BashResult:
+    ) -> SandboxResult:
         proc = await asyncio.create_subprocess_shell(
             cmd,
             cwd=str(cwd) if cwd else None,
@@ -34,9 +31,9 @@ class BashRunner:
         except asyncio.TimeoutError:
             proc.kill()
             await proc.wait()
-            return BashResult(stdout="", stderr=f"timeout after {timeout}s", exit_code=124)
+            return SandboxResult(stdout="", stderr=f"timeout after {timeout}s", exit_code=124)
 
-        return BashResult(
+        return SandboxResult(
             stdout=stdout_b.decode(errors="replace"),
             stderr=stderr_b.decode(errors="replace"),
             exit_code=proc.returncode if proc.returncode is not None else 0,

@@ -3,8 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from core.protocol import ToolResult
-from core.sandbox import BashRunner
+from core.protocol import SandboxRunner, ToolResult
 
 
 class BashTool:
@@ -27,7 +26,7 @@ class BashTool:
         },
     }
 
-    def __init__(self, runner: BashRunner, workspace: Path) -> None:
+    def __init__(self, runner: SandboxRunner, workspace: Path) -> None:
         self._runner = runner
         self._workspace = workspace
 

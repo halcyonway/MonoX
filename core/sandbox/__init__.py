@@ -1,3 +1,3 @@
-from .bash_runner import BashResult, BashRunner
+from .bash_runner import BashRunner
 
-__all__ = ["BashResult", "BashRunner"]
+__all__ = ["BashRunner"]
