@@ -13,6 +13,7 @@ MonoX 是一个**自托管最小 agent runtime core**。目标不是产品化 Sa
 3. **依赖最小**：避免「feature 强但依赖重」的库（如 LangChain、autogen）。需要时手写，不超过 100 行。
 4. **可观测**：每次 turn 都能看到 step / latency / token / state 切换（debug mode / spec metrics）。
 5. **可中断**：Ctrl+C、exit 都能让 runtime 干净退出（待解决）。
+6. **系统 = 模块 + 协议**：模块有边界、可替换；协议是模块间稳定契约。模块只通过协议交互，不直接依赖具体实现。
 
 ## 短期（v1.0 前）
 

@@ -8,6 +8,11 @@ extensions/     可重写的适配层。channel adapter、skill、tool 注册入
 run.py          装配脚本（顶层，不属于 core 也不属于 extension）。
 ```
 
+**系统 = 模块 + 协议。**
+
+- 模块有边界、可替换；协议是模块间稳定契约（`Protocol` + frozen dataclass）。
+- 模块只通过协议交互，不直接依赖具体实现；替换实现不改协议，就不动其他模块。
+
 **core 是 stable kernel，不为单个 channel / skill / LLM 妥协。**
 
 - core 只依赖：`httpx`（LLMProxy stream）、`tomli`（py<3.11 兼容）
