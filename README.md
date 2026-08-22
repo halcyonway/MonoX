@@ -1,79 +1,81 @@
 # MonoX
 
-极简 Agent Runtime Core。通过 IM（飞书 / Slack / 本地 terminal）与 Agent 交互，运行在本地 docker 中。
+极简 Agent Runtime Core。通过 channel 与 Agent 交互——channel 是独立进程，Runtime 只跑核心逻辑。
+
+## 设计哲学
+
+- **Runtime 极简**：只管 LoopEngine + SessionManager + ws server，不碰 channel
+- **Channel 独立**：每个 channel 是独立进程，独立升级，Runtime 通过 WebSocket 连接
+- **配置驱动**：所有连接参数（host/port/api_key）在 `config.toml`，Runtime 读取 LLM 配置，channel 读自己那份
+- **单进程多 session**：一个 Runtime 支持多个 `session_key`，idle 回收
+
+详见 `spec/ARCHITECTURE.md`（§12 讲 Runtime 架构）和 `spec/requirements/multi-session.md`（多 session 设计）。
 
 ## 架构
 
 ```
-Channel → Gateway → Loop → {Sandbox, LLMProxy}
-                  → Memory
+┌──────────────────────────────────────────────────────────┐
+│                     Runtime 进程                          │
+│                                                          │
+│   SessionManager (多 LoopEngine + idle sweep)             │
+│            ▲                                             │
+│            │ dispatch_inbound                             │
+│            ▼                                             │
+│   RuntimeServer (ws :8765, last_active_source fan-out)  │
+│            ▲                                             │
+│            │                                             │
+│   HealthServer (GET /health :8767)                       │
+└──────────────────────────────────────────────────────────┘
+        ▲                ▲                ▲
+        │ ws             │ ws             │ ws
+   ┌────┴────┐    ┌─────┴─────┐   ┌────┴────┐
+   │terminal │    │ monoDesk  │   │ feishu   │
+   │(独立进程)│    │ 桌面 app   │   │(独立进程)│
+   └─────────┘    └───────────┘   └──────────┘
 ```
 
-完整设计见 `Project/Agent Runtime Core - 设计方案.md` 或 `spec/` 下的迭代记录。
-
-## 目录
-
-- `core/` — 最小 runtime 核心（Python，稳定内核）
-- `extensions/` — 业务能力（skill / cli，独立迭代）
-- `run.py` — 启动入口（装配 + 启动）
-- `scripts/install.sh` — 一次性本地准备
-- `spec/` — 每次需求的设计讨论与 AI coding 记录
-
-## 依赖管理（uv）
+## 快速启动
 
 ```bash
-uv sync              # 装所有依赖到 .venv
-uv add <pkg>         # 加 runtime 依赖
-uv add --dev <pkg>   # 加 dev 依赖
-uv run python ...    # 用 .venv 跑
-```
-
-## 本地启动
-
-```bash
-# 1. 一次性准备（建 .monox + 拷默认 skill）
+# 1. 准备
 ./scripts/install.sh
 
-# 2. 配 API key
-export MINIMAX_API_KEY=eyJ...   # 或 OPENAI_API_KEY / DEEPSEEK_API_KEY 等
+# 2. 配置
+export MINIMAX_API_KEY=eyJ...
+# 编辑 config.toml：api_base / api_key / model
 
-# 3. 改 config.toml：api_base / api_key / model 对应你的 provider
-#    默认值已指向 api.minimaxi.com + MiniMax-M2.7
-
-# 4. 跑
+# 3. 启动 Runtime
 uv run python run.py
+
+# 4. 启动 channel（另一个终端）
+uv run python -m extensions.channels.terminal   # terminal TUI
+npm run tauri dev                             # monoDesk 桌面 UI
+
+# 5. 查状态
+curl http://127.0.0.1:8767/health
 ```
 
-启动后看到 `[state: thinking]`，输入消息，agent 开始工作。`exit` 或 Ctrl+C 退出。
+## Channel 列表
 
-## 数据目录（默认 `.monox/`）
+| Channel | 启动方式 | 说明 |
+|---|---|---|
+| terminal | `uv run python -m extensions.channels.terminal` | stdio TUI |
+| monodesk | `npm run tauri dev`（MonoDesk repo） | 桌面 app，连 `ws://127.0.0.1:8766` |
+| feishu | `uv run python -m extensions.channels.feishu` | 飞书 lark-oapi |
+| textual | `uv run python -m extensions.channels.textual_chat` | textual 全屏 TUI |
+
+## 目录结构
 
 ```
-.monox/
-├── workspace/<session_key>/    # agent 工作目录
-├── memory/<session_key>/       # Memory.md + notes/ + checkpoint.jsonl
-├── skills/                     # 共享 skill（install.sh 拷默认）
-└── tmp/                        # 临时文件
+core/           # Runtime 核心（SessionManager / RuntimeServer / LoopEngine）
+extensions/     # 能力扩展（channels / skills）
+run.py          # 唯一启动入口
+config.toml     # 运行时配置
+spec/           # 设计文档（ARCHITECTURE.md + requirements/）
 ```
-
-所有路径在 config.toml `[sandbox]` 段可改。
-
-## Docker（未来多种 image）
-
-当前 image 是 agent loop + bash 沙箱。未来可能拆：
-- `monox-runtime`：纯 runtime（sqlite 等）
-- `monox-agent`：loop + sandbox
-- `monox-gateway`：IM 适配层
-
-具体先不设计，先本地跑通。
 
 ## 测试
 
 ```bash
-uv run python tests/test_e2e.py
+uv run pytest tests/ -q
 ```
-
-覆盖：
-- `test_basic_bash`：基础 bash + final message
-- `test_wait_io_ends_turn`：wait_io 主动结束（1 次 LLM 调用）
-- `test_queue_aggregate_continues_react`：queue 聚合继续 react

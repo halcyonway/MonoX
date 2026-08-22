@@ -77,15 +77,137 @@ class LoopEngine:
     ) -> None:
         await self._restore()
 
-        while True:
-            ev = await input_queue.get()
-            self._messages.append({"role": "user", "content": ev.text})
+        # 持续在后台 pump input_queue → 内部 sub_queue（保证 main loop 的 await 不会阻塞 react）
+        sub_queue: asyncio.Queue[InboundEvent] = asyncio.Queue()
 
-            final_text = await self._react(input_queue, output_queue)
+        async def pumper():
+            while True:
+                ev = await input_queue.get()
+                await sub_queue.put(ev)
 
-            await output_queue.put(
-                FinalMessage(text=final_text, metrics=self._session_metric.snapshot())
+        pump_task = asyncio.create_task(pumper())
+
+        # 当前 react step 的 task；interrupt 会取消它。
+        step_task: asyncio.Task[str] | None = None
+
+        async def next_input_or_done() -> tuple[InboundEvent | None, str | None]:
+            """等下一个 input 事件，或当前 step 完成。
+
+            返回 (input_event, final_text)；二者只有一个非 None。
+            """
+            nonlocal step_task
+            # 起一个 task 等 sub_queue
+            get_task = asyncio.create_task(sub_queue.get())
+            try:
+                if step_task is None:
+                    ev = await get_task
+                    return ev, None
+                # 同时等 input 和 step 哪个先到
+                done, pending = await asyncio.wait(
+                    {get_task, step_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if step_task in done:
+                    # react 完成；cancel 等 sub_queue 的 task
+                    get_task.cancel()
+                    try: await get_task
+                    except: pass
+                    final = step_task.result()
+                    return None, final
+                else:
+                    # input 先到；cancel step（仅当 step 已跑完；否则让它继续）
+                    ev = get_task.result()
+                    return ev, None
+            except asyncio.CancelledError:
+                if not get_task.done():
+                    get_task.cancel()
+                raise
+
+        try:
+            while True:
+                if step_task is None:
+                    ev = await sub_queue.get()
+                else:
+                    # react 跑着，等 interrupt 帧或 react 完成
+                    ev, final_text = await self._select(sub_queue, step_task)
+                    if ev is None:
+                        # react 完成
+                        try:
+                            final_text = step_task.result()
+                        except asyncio.CancelledError:
+                            self._messages = self._msgs_before
+                            self._step_idx -= 1
+                            self._session_metric.drop_last()
+                            await output_queue.put(StatusChange(state="idle"))
+                            step_task = None
+                            continue
+                        await output_queue.put(
+                            FinalMessage(text=final_text, metrics=self._session_metric.snapshot())
+                        )
+                        step_task = None
+                        continue
+
+                if ev.kind == "interrupt":
+                    # 真打断：取消正在跑的 step task，不污染 messages。
+                    if step_task is not None and not step_task.done():
+                        self._msgs_before = list(self._messages)
+                        step_task.cancel()
+                        try:
+                            await asyncio.wait_for(step_task, timeout=5.0)
+                        except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+                            pass
+                    step_task = None
+                    await output_queue.put(StatusChange(state="idle"))
+                    # drain 余下 interrupt；非 interrupt 事件放回 sub_queue 队首
+                    first_non_interrupt: InboundEvent | None = None
+                    while not sub_queue.empty():
+                        try:
+                            nxt = sub_queue.get_nowait()
+                        except asyncio.QueueEmpty:
+                            break
+                        if nxt.kind == "interrupt":
+                            continue
+                        first_non_interrupt = nxt
+                        break
+                    if first_non_interrupt is not None:
+                        await sub_queue.put(first_non_interrupt)
+                    continue
+
+                self._messages.append({"role": "user", "content": ev.text})
+
+                # react 前快照 messages；cancel 后回滚到该状态
+                self._msgs_before = list(self._messages)
+                step_task = asyncio.create_task(
+                    self._react(sub_queue, output_queue)
+                )
+        finally:
+            pump_task.cancel()
+            try: await pump_task
+            except: pass
+
+    @staticmethod
+    async def _select(
+        queue: asyncio.Queue[InboundEvent],
+        step_task: asyncio.Task[str],
+    ) -> tuple[InboundEvent | None, str | None]:
+        """等 queue.get() 或 step_task 完成；先到先返回。"""
+        get_task = asyncio.create_task(queue.get())
+        try:
+            done, pending = await asyncio.wait(
+                {get_task, step_task},
+                return_when=asyncio.FIRST_COMPLETED,
             )
+            if step_task in done:
+                get_task.cancel()
+                try: await get_task
+                except: pass
+                return None, step_task.result()
+            else:
+                return get_task.result(), None
+        except asyncio.CancelledError:
+            if not get_task.done():
+                get_task.cancel()
+            raise
 
     async def _restore(self) -> None:
         ck = await self._checkpoint.load_latest(self._session_key)
@@ -93,6 +215,11 @@ class LoopEngine:
             return
         self._messages = list(ck.messages)
         self._step_idx = ck.step_idx + 1
+
+    @staticmethod
+    async def _await_step(t: asyncio.Task) -> str:
+        """包装 task await，让 step_task.cancelled() 变成正常返回而不是抛 CancelledError。"""
+        return await t
 
     async def _react(
         self,

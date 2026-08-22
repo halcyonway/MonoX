@@ -28,6 +28,10 @@ class SessionMetric:
     def add(self, metric: StepMetric) -> None:
         self.steps.append(metric)
 
+    def drop_last(self) -> None:
+        if self.steps:
+            self.steps.pop()
+
     def snapshot(self) -> dict[str, Any]:
         return {
             "steps": len(self.steps),
