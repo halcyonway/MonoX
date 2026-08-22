@@ -17,8 +17,8 @@ import shutil
 from pathlib import Path
 
 from core.channel.base import Channel
-from core.gateway import Gateway
 from core.llm_proxy import OpenAIStreamProxy  # noqa: F401  验证 import
+from tests._inprocess_bridge import InProcessBridge
 from core.loop.checkpoint import JsonlCheckpointStore
 from core.loop.compression import CompressionService
 from core.loop.engine import LoopEngine
@@ -117,7 +117,7 @@ async def run_pipeline(tmp: Path, llm: MockLLM, events: list[InboundEvent]) -> M
     ch = MockChannel(events)
     iq: asyncio.Queue[InboundEvent] = asyncio.Queue()
     oq: asyncio.Queue[StreamEvent] = asyncio.Queue()
-    gw = Gateway(ch, loop_input=iq, loop_output=oq)
+    gw = InProcessBridge(ch, loop_input=iq, loop_output=oq)
     gw_task = asyncio.create_task(gw.run())
     loop_task = asyncio.create_task(loop.run(iq, oq))
     await asyncio.wait_for(ch._final_done.wait(), timeout=10.0)
@@ -196,7 +196,7 @@ async def test_queue_aggregate_continues_react() -> None:
     ch = MockChannel([InboundEvent(session_key="default", kind="message", text="first")])
     iq: asyncio.Queue[InboundEvent] = asyncio.Queue()
     oq: asyncio.Queue[StreamEvent] = asyncio.Queue()
-    gw = Gateway(ch, loop_input=iq, loop_output=oq)
+    gw = InProcessBridge(ch, loop_input=iq, loop_output=oq)
     gw_task = asyncio.create_task(gw.run())
     loop_task = asyncio.create_task(loop.run(iq, oq))
 
@@ -256,7 +256,7 @@ async def test_chat_only_persists_across_restart() -> None:
     ch2 = MockChannel([InboundEvent(session_key="default", kind="message", text="again")])
     iq: asyncio.Queue[InboundEvent] = asyncio.Queue()
     oq: asyncio.Queue[StreamEvent] = asyncio.Queue()
-    gw = Gateway(ch2, loop_input=iq, loop_output=oq)
+    gw = InProcessBridge(ch2, loop_input=iq, loop_output=oq)
     gw_task = asyncio.create_task(gw.run())
     loop_task = asyncio.create_task(loop.run(iq, oq))
     await asyncio.wait_for(ch2._final_done.wait(), timeout=10.0)
@@ -348,7 +348,7 @@ async def test_l2_compression_folds_early_turns() -> None:
     for e in events:
         iq.put_nowait(e)
 
-    gw = Gateway(ch, loop_input=iq, loop_output=oq)
+    gw = InProcessBridge(ch, loop_input=iq, loop_output=oq)
     gw_task = asyncio.create_task(gw.run())
     loop_task = asyncio.create_task(loop.run(iq, oq))
     await asyncio.wait_for(ch._final_done.wait(), timeout=10.0)
