@@ -1,10 +1,10 @@
 # MonoX
 
-自托管的 Agent Runtime Core。
+A minimal, self-use Agent Runtime. Code it, scratch it, keep it lean.
 
 **系统 = 模块 + 协议。** Runtime 进程跑核心（协议 + ReAct 引擎 + 存储/执行抽象），channel 作为 feature 通过协议接入。
 
-[MonoDesk](https://github.com/halcyonway/MonoDesk) 是 monoDesk 桌面 UI 的 channel 实现（独立仓库）。
+[MonoDesk](https://github.com/halcyonway/MonoDesk) 是桌面 UI channel 实现（独立仓库）。
 
 ## Design philosophy
 
@@ -83,12 +83,14 @@ curl http://127.0.0.1:8767/health
 
 ## Channels
 
-| Channel | Repo | Launch | Description |
-|---|---|---|---|
-| terminal | MonoX | `uv run python -m extensions.channels.terminal` | stdio TUI |
-| monodesk | [MonoDesk](https://github.com/halcyonway/MonoDesk) | `npm run tauri dev` | desktop app |
-| feishu | MonoX | `uv run python -m extensions.channels.feishu` | lark-oapi |
-| textual | MonoX | `uv run python -m extensions.channels.textual_chat` | textual full-screen TUI |
+| Channel | Description |
+|---|---|
+| terminal | stdio TUI |
+| monodesk | desktop app (separate repo: [MonoDesk](https://github.com/halcyonway/MonoDesk)) |
+| feishu | lark-oapi |
+| textual | textual full-screen TUI |
+
+Channels 自带启动方式，详见各自代码。
 
 ## Layout
 
