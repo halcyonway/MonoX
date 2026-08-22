@@ -10,12 +10,14 @@ venv/
 .DS_Store
 *.log
 
-# runtime data (mounted via docker, not in repo)
+# runtime data directories (never commit)
+.monox/
 workspace/
 memory/
 tmp/
 
-# core/memory is source code, not runtime data
+# skills source code (not runtime data)
+!extensions/skills/
 !core/memory/
 
 # local config — keep config.example.toml as template, ignore user's config.toml

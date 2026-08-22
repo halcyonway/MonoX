@@ -1,3 +1,10 @@
+---
+name: memory-write
+description: Write to long-term memory (notes/ + Memory.md index)
+metadata:
+  type: skill
+---
+
 # Memory Write
 
 写入长期记忆。
