@@ -47,7 +47,7 @@ graph TB
     Health --> Session
 
     Channels -.实现 Channel 协议.-> Protocol
-    Skills -.LLM 读 SKILL.md.-> Loop
+    Skills -.-> Loop
 
     Run --> Core
     Run --> Channels
@@ -116,3 +116,15 @@ spec/                 # 设计文档（ARCHITECTURE.md + requirements/）
 ```bash
 uv run pytest tests/ -q
 ```
+
+## Feature 模块
+
+| 模块 | 状态 | spec |
+|---|---|---|
+| 多 session（lazy create + idle 销毁 + checkpoint 恢复） | 已实现 | [`spec/requirements/multi-session.md`](spec/requirements/multi-session.md) |
+| 进程生命周期（PID 文件 + `--stop` + channel supervisor） | 已实现 | [`spec/requirements/runtime-lifecycle.md`](spec/requirements/runtime-lifecycle.md) |
+| 上下文压缩（L1/L2，session 内） | L1 已就位 | [`spec/requirements/context-compression.md`](spec/requirements/context-compression.md) |
+| EventWrapper（外部信号统一 XML 包装） | 已实现 | [`spec/requirements/event-wrapper.md`](spec/requirements/event-wrapper.md) |
+| 飞书 channel（lark-oapi） | 已实现 | [`spec/requirements/feishu-channel.md`](spec/requirements/feishu-channel.md) |
+| Engine shutdown_event（channel 关闭干净退出） | 未开始 | [`spec/requirements/shutdown.md`](spec/requirements/shutdown.md) |
+| LLM harness（retry / fallback / rate-limit） | 未开始 | [`spec/requirements/llm-harness.md`](spec/requirements/llm-harness.md) |
