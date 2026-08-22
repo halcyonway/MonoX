@@ -68,6 +68,17 @@ class SandboxConfig:
 
 
 @dataclass(frozen=True)
+class ServerConfig:
+    """Runtime ws server 配置。
+
+    Runtime 进程启动时绑这里指定的 host:port，给 channel ws client 连。
+    """
+    host: str = "127.0.0.1"
+    port: int = 8765
+    max_clients: int = 16
+
+
+@dataclass(frozen=True)
 class Config:
     session_key: str = "default"
     llm: LLMConfig = field(default_factory=LLMConfig)
@@ -75,6 +86,7 @@ class Config:
     channel: ChannelConfig = field(default_factory=ChannelConfig)
     sandbox: SandboxConfig = field(default_factory=SandboxConfig)
     multi_channel: MultiChannelConfig = field(default_factory=MultiChannelConfig)
+    server: ServerConfig = field(default_factory=ServerConfig)
 
     @classmethod
     def load(cls, path: str | Path) -> "Config":
@@ -138,6 +150,7 @@ class Config:
             channel=single_ch,
             sandbox=SandboxConfig(**data.get("sandbox", {})),
             multi_channel=multi_ch,
+            server=ServerConfig(**data.get("server", {})),
         )
 
 
