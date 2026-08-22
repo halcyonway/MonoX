@@ -13,25 +13,25 @@
 
 ## 架构
 
-```
-┌──────────────────────────────────────────────────────────┐
-│                     Runtime 进程                          │
-│                                                          │
-│   SessionManager (多 LoopEngine + idle sweep)             │
-│            ▲                                             │
-│            │ dispatch_inbound                             │
-│            ▼                                             │
-│   RuntimeServer (ws :8765, last_active_source fan-out)  │
-│            ▲                                             │
-│            │                                             │
-│   HealthServer (GET /health :8767)                       │
-└──────────────────────────────────────────────────────────┘
-        ▲                ▲                ▲
-        │ ws             │ ws             │ ws
-   ┌────┴────┐    ┌─────┴─────┐   ┌────┴────┐
-   │terminal │    │ monoDesk  │   │ feishu   │
-   │(独立进程)│    │ 桌面 app   │   │(独立进程)│
-   └─────────┘    └───────────┘   └──────────┘
+```mermaid
+graph TD
+    subgraph Runtime["Runtime 进程"]
+        SM[SessionManager<br/>多 LoopEngine + idle sweep]
+        RS[RuntimeServer<br/>ws :8765]
+        HS[HealthServer<br/>:8767]
+
+        SM --> RS
+        RS --> HS
+    end
+
+    T[terminal<br/>独立进程] -->|ws| RS
+    D[monoDesk<br/>桌面 app] -->|ws :8766| RS
+    F[feishu<br/>独立进程] -->|ws| RS
+
+    classDef runtime fill:#e8f4f8,stroke:#333,stroke-width:2px
+    classDef channel fill:#fdf3e7,stroke:#333,stroke-width:1px
+    class SM,RS,HS runtime
+    class T,D,F channel
 ```
 
 ## 快速启动
