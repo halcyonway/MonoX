@@ -13,24 +13,15 @@ from unittest.mock import MagicMock
 
 from extensions.channels import _runtime
 from extensions.channels.feishu import __main__ as feishu_main
-from extensions.channels.monodesk import __main__ as monodesk_main
 from extensions.channels.terminal import __main__ as terminal_main
 from extensions.channels.textual_chat import __main__ as textual_main
 
 
 def test_all_channel_modules_importable():
-    """4 个 channel 的 __main__ 模块都能 import 不报错。"""
-    assert monodesk_main is not None
+    """3 个 channel 的 __main__ 模块都能 import 不报错。"""
     assert terminal_main is not None
     assert feishu_main is not None
     assert textual_main is not None
-
-
-def test_monodesk_default_args():
-    args = monodesk_main.parse_args([])
-    assert args.runtime_url == "ws://127.0.0.1:8765"
-    assert args.session_key == "default"
-    assert args.port == 8766
 
 
 def test_terminal_default_args():

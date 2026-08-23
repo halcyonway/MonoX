@@ -93,6 +93,10 @@ class FeishuChannel:
         self._started = threading.Event()
         self._open_id_by_chat: dict[str, str] = {}
         self._pending_session_key: str | None = None
+        # 最近一次入站的真实 chat_id（reply 时按这个找 open_id）。
+        # session_key 跨 channel 共享 default 后不再是 chat_id，所以 send 不能直接
+        # 用 session_key 查 _open_id_by_chat，改用 listen 时记下的最近 chat_id。
+        self._last_chat_id: str | None = None
         # 卡片状态：session_key → CardState
         self._card_by_session: dict[str, _CardState] = {}
         # 消息 ID 去重（飞书可能重试）
@@ -187,7 +191,10 @@ class FeishuChannel:
             sys.stderr.flush()
 
             event_obj = InboundEvent(
-                session_key=chat_id,
+                # 所有 feishu chat 都映射到 'default' —— 跨 channel 共享主会话
+                # （MonoDesk / terminal / feishu 共用同一份对话历史）。
+                # 真实 chat_id 保留在 meta 里，send 时按 _last_chat_id 找回 open_id。
+                session_key="default",
                 kind="message",
                 text=text,
                 source="feishu",
@@ -195,6 +202,7 @@ class FeishuChannel:
                 timestamp=time.time(),
                 meta={"chat_id": chat_id, "open_id": open_id, "message_id": message_id},
             )
+            self._last_chat_id = chat_id
             self._sync_q.put_nowait(event_obj)
         except Exception as e:
             import sys
@@ -204,7 +212,8 @@ class FeishuChannel:
     def _queue_reply(self, chat_id: str, open_id: str, text: str) -> None:
         try:
             event_obj = InboundEvent(
-                session_key=chat_id,
+                # 同上：所有 reply 都走 default session_key，跨 channel 共享
+                session_key="default",
                 kind="message",
                 text=f"[auto-reply] {text}",
                 source="feishu",
@@ -242,34 +251,35 @@ class FeishuChannel:
         if getattr(event, "_auto_reply", False):
             return
 
-        session_key = (
-            getattr(event, "session_key", None)
-            or self._pending_session_key
-            or self._session_key
-        )
-        open_id = self._open_id_by_chat.get(session_key, "")
+        # session_key 在跨 channel 共享 default 后不再是 chat_id。
+        # 用最近一次入站的 chat_id 去找 open_id（reply 一定是对最近消息的回应）。
+        # 兜底：如果 _last_chat_id 还没填（旧数据/非典型路径），退回用 _pending_session_key 当 chat_id。
+        chat_id = self._last_chat_id or self._pending_session_key or self._session_key
+        open_id = self._open_id_by_chat.get(chat_id, "")
         if not open_id:
             import sys
-            sys.stderr.write(f"[FeishuChannel] no open_id for session {session_key}\n")
+            sys.stderr.write(
+                f"[FeishuChannel] no open_id for chat_id={chat_id}\n"
+            )
             sys.stderr.flush()
             return
 
         if isinstance(event, StatusChange):
             if event.state == "thinking":
-                await self._send_thinking_card(open_id, session_key)
+                await self._send_thinking_card(open_id, chat_id)
             return
 
         if isinstance(event, TokenChunk):
-            await self._patch_card(session_key, open_id, event.text, False)
+            await self._patch_card(chat_id, open_id, event.text, False)
             return
 
         if isinstance(event, FinalMessage):
-            await self._patch_card(session_key, open_id, event.text, True)
+            await self._patch_card(chat_id, open_id, event.text, True)
             return
 
         if isinstance(event, ErrorEvent):
             text = f"❌ {event.msg}"
-            await self._patch_card(session_key, open_id, text, True)
+            await self._patch_card(chat_id, open_id, text, True)
             return
 
     async def _send_thinking_card(self, open_id: str, session_key: str) -> None:

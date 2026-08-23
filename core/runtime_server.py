@@ -1,19 +1,21 @@
 """Runtime ws server（多 session + 多 source 形态）。
 
 Runtime 进程对外只暴露 ws server，每个 ws conn 代表一个 channel 进程。
-ws conn 用 `(session_key, source)` 二元组索引（多 channel 可共享 session_key）。
-Runtime 不感知 channel 协议——把 InboundEvent 派发给注册的 inbound handler，
-把 StreamEvent 按 `(session_key, last_active_source)` 路由到目标 ws conn。
+ws conn 用 `source`（channel 名）索引——一个 channel 一条连接，服务该 channel 的
+所有 session_key。Runtime 不感知 channel 协议——把 InboundEvent 派发给注册的
+inbound handler，把 StreamEvent 按 `(session_key, last_active_source)` 路由到
+source 对应的 ws conn。
 
     Channel 进程 ──ws(user_input/command/interrupt)──► Runtime
                   ◄─ws(status/token/.../final/error)──
 
 设计：
-- 同 `(session_key, source)` 第二个连接进来 → 主动 close 旧连接（防同 channel 双开）
-- 同 `session_key` 不同 `source` 允许多 conn（terminal + monodesk 共用 "default"）
-- `last_active_source[sk]` 追踪最近上行 source；fan-out 时只发给该 `(sk, source)` 的 conn
-- conn 断开时若 last_active_source 仍指向已无 conn 的 source → 清理
-- hello 帧 schema：`data.session_key` / `data.source`——Runtime 用 source 索引 conn（model 由 Runtime 自己读 config.toml，不通过 hello 传）
+- `_clients: dict[source, ws]`，同 source 第二个连接进来 → 主动 close 旧连接（防同 channel 双开）
+- session_key 用 `channel_name:channel_session_id` 全局唯一，故连接无需按 session_key 索引
+- `last_active_source[session_key]` 追踪该 session 最近上行的 source；fan-out 时按 source 找 conn
+- session 销毁（idle destroy）时由 `unregister_outbound_queue` 清掉对应 last_active 条目
+- hello 帧 schema：`data.session_key` / `data.source`——`session_key` 作为该 channel 的
+  default session_key（帧缺 session_key 时回退用）；`source` 作为连接索引 key
 """
 from __future__ import annotations
 
@@ -55,8 +57,9 @@ class RuntimeServer:
         server.register_outbound_queue("default", output_q)
         asyncio.gather(server.run(), session_manager.run())
 
-    inbound handler 由外部 SessionManager 提供——RuntimeServer 不知道 SessionManager 存在。
-    outbound per-session output_q 由 SessionManager 在 create SessionLoop 后注册。
+    inbound handler 由外部 SessionManager 提供（经 set_inbound_handler 注入）；
+    RuntimeServer 不持有 SessionManager 引用。outbound per-session output_q 由 SessionManager
+    在 create SessionLoop 后注册。
     """
 
     def __init__(
@@ -70,7 +73,8 @@ class RuntimeServer:
         self._default_session_key = default_session_key
         self._default_source = default_source
 
-        self._clients: dict[tuple[str, str], ServerConnection] = {}
+        # source（channel 名）→ ws conn。一个 channel 一条连接，服务其所有 session_key。
+        self._clients: dict[str, ServerConnection] = {}
         self._last_active_source: dict[str, str] = {}
         self._clients_lock = asyncio.Lock()
 
@@ -208,18 +212,16 @@ class RuntimeServer:
                 default_source=source,
             )
 
-        # 注册：(session_key, source) 二元组索引；同对再连 replace
-        key = (session_key, source)
+        # 注册：按 source 索引；同 source 再连 replace 旧连接
         async with self._clients_lock:
-            old = self._clients.get(key)
+            old = self._clients.get(source)
             if old is not None and old is not ws:
                 try:
                     await old.close(code=1011, reason="replaced")
                 except Exception:
                     pass
-            self._clients[key] = ws
-            # 最近注册的 source 视为隐式 last_active（让首次连接后产生的下行事件有出口）
-            # 后续有 inbound 时会被 dispatch_inbound 覆盖。
+            self._clients[source] = ws
+            # 该 channel 的 default session 视为隐式 last_active（让首次连接后产生的下行事件有出口）
             self._last_active_source[session_key] = source
 
         if first_ev is not None:
@@ -229,10 +231,8 @@ class RuntimeServer:
             await self._recv_loop(ws, session_key, source)
         finally:
             async with self._clients_lock:
-                if self._clients.get(key) is ws:
-                    del self._clients[key]
-            # 断开后：若 last_active_source 仍指向已无 conn 的 source → 清理
-            self._maybe_clear_last_active(session_key, source)
+                if self._clients.get(source) is ws:
+                    del self._clients[source]
 
     async def _recv_loop(self, ws: ServerConnection, session_key: str, source: str) -> None:
         try:
@@ -256,21 +256,11 @@ class RuntimeServer:
             sys.stderr.flush()
 
     async def _dispatch_inbound(self, ev: InboundEvent) -> None:
-        # 更新 last_active_source（仅当 ev.source 非空）
+        if self._inbound_handler is None:
+            return
+        await self._inbound_handler(ev)
         if ev.source:
             self._last_active_source[ev.session_key] = ev.source
-        if self._inbound_handler is not None:
-            await self._inbound_handler(ev)
-
-    def _maybe_clear_last_active(self, session_key: str, source: str) -> None:
-        """conn 断开后调用：若 last_active_source 仍指向 source 且没有该 source 的其他 conn → 清。"""
-        if self._last_active_source.get(session_key) != source:
-            return
-        # 检查同 session_key 还有没有 (sk, source) 的 conn
-        for (sk, src) in self._clients.keys():
-            if sk == session_key and src == source:
-                return
-        self._last_active_source.pop(session_key, None)
 
     # ------------------------------------------------------------------
     # outbound: per-session consumer task → 按 last_active_source 路由
@@ -284,9 +274,8 @@ class RuntimeServer:
             src = self._last_active_source.get(session_key)
             if src is None:
                 continue  # 无活跃 source → 丢弃
-            key = (session_key, src)
             async with self._clients_lock:
-                ws = self._clients.get(key)
+                ws = self._clients.get(src)
             if ws is None:
                 continue  # 该 source 已断开 → 丢弃
             frame = to_frame(ev, seq=next(self._seq))
@@ -300,6 +289,5 @@ class RuntimeServer:
                 sys.stderr.flush()
                 # send 失败 → 该 conn 已死；清理
                 async with self._clients_lock:
-                    if self._clients.get(key) is ws:
-                        del self._clients[key]
-                self._maybe_clear_last_active(session_key, src)
+                    if self._clients.get(src) is ws:
+                        del self._clients[src]

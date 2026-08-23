@@ -5,11 +5,12 @@ Runtime 进程做三件事：
   2) 起 HealthServer（HTTP `/health` 端点，:8767）
   3) 起 SessionManager（管理多 session_key 的 LoopEngine，idle 自动销毁 + 恢复）
 
-channel 是独立进程，各自从 config.toml 读配置，不由 run.py 拉起。
+channel 是独立进程，各自从 config.toml 读配置。terminal / textual 手动启动；
+feishu 由 run.py 代拉起（config 配了 app_id/app_secret 时 spawn 子进程）。
 各 channel 启动方式：
   terminal:   uv run python -m extensions.channels.terminal
-  monodesk:    monoDesk 桌面 app（连 ws://127.0.0.1:8766）
-  feishu:      uv run python -m extensions.channels.feishu
+  monodesk:    MonoDesk 桌面 app（直接连 Runtime ws://127.0.0.1:8765，无独立进程）
+  feishu:      run.py 自动拉起（[[channels]] kind="feishu" 配好 app_id/app_secret）
   textual:     uv run python -m extensions.channels.textual_chat
 
 启动：
@@ -60,10 +61,10 @@ When you are done with the current turn and ready to receive the next message, c
 _log = logging.getLogger("monox.runtime")
 
 
-# run.py 自己的 PID 文件路径 + Runtime 默认占用的三个端口。
+# run.py 自己的 PID 文件路径 + Runtime 默认占用的两个端口。
 # `--stop` 用 PID 文件找本进程；用端口扫残留（PID 文件丢失或之前 crash 留下的进程）。
 PID_FILE = Path(".monox/runtime.pid")
-DEFAULT_RUNTIME_PORTS = (8765, 8766, 8767)  # ws server / monodesk ws / health
+DEFAULT_RUNTIME_PORTS = (8765, 8767)  # ws server / health
 
 
 def _pid_alive(pid: int) -> bool:
@@ -209,7 +210,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--stop",
         action="store_true",
-        help="Kill any running Runtime (PID file + port sweep on :8765/:8766/:8767) and exit.",
+        help="Kill any running Runtime (PID file + port sweep on :8765/:8767) and exit.",
     )
     return parser.parse_args()
 
@@ -217,6 +218,39 @@ def parse_args() -> argparse.Namespace:
 def _ensure_dirs(paths: dict[str, Path]) -> None:
     for key in ("workspace", "memory", "memory_notes", "tmp_root", "skills_root"):
         paths[key].mkdir(parents=True, exist_ok=True)
+
+
+def _spawn_feishu(cfg: Config) -> subprocess.Popen | None:
+    """run.py 代拉起 feishu channel（仍是独立进程）。
+
+    从 config 的 [[channels]] 找 kind="feishu"，配了 app_id/app_secret 就 spawn
+    `python -m extensions.channels.feishu`；没配（注释掉或留空）则跳过。
+    feishu 子进程内部自带 supervisor（run_channel 崩了退避重启），run.py 只管起 +
+    shutdown 时 SIGTERM。
+    """
+    for ch in cfg.multi_channel.channels:
+        if ch.kind != "feishu":
+            continue
+        app_id = ch.options.get("app_id", "")
+        app_secret = ch.options.get("app_secret", "")
+        if not app_id or not app_secret:
+            _log.warning(
+                "[feishu] app_id/app_secret 为空，跳过启动；请在 config 的 "
+                '[[channels]] kind="feishu" 里填真实凭据'
+            )
+            return None
+        allowed = ch.options.get("allowed_chats", [])
+        cmd = [
+            sys.executable, "-m", "extensions.channels.feishu",
+            f"--runtime-url=ws://{cfg.server.host}:{cfg.server.port}",
+            f"--app-id={app_id}",
+            f"--app-secret={app_secret}",
+            f"--allowed-chats={','.join(allowed)}",
+        ]
+        proc = subprocess.Popen(cmd)
+        _log.info("[feishu] spawned pid=%d", proc.pid)
+        return proc
+    return None
 
 
 async def run(cfg_path: str, args: argparse.Namespace) -> None:
@@ -322,10 +356,15 @@ async def run(cfg_path: str, args: argparse.Namespace) -> None:
         flush=True,
     )
 
+    # feishu 由 run.py 代拉起（config 配了 app_id/app_secret 才 spawn；否则 None）
+    feishu_proc = _spawn_feishu(cfg)
+
     await session_mgr.start()
     try:
         await asyncio.gather(server.run(), health.run())
     finally:
+        if feishu_proc is not None and feishu_proc.poll() is None:
+            feishu_proc.terminate()
         await session_mgr.stop()
         await server.stop()
         await health.stop()

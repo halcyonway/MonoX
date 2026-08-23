@@ -1,7 +1,7 @@
 """core/runtime_ws_client.py 单测。
 
 验证 channel 进程侧 ws client 与 Runtime 端 server 的协议握手：
-- hello 帧必带 data.source + session_key → server 按 (sk, src) 注册 + 记录 last_active
+- hello 帧必带 data.source + session_key → server 按 source 注册 + 记录 last_active
 - 重连：ws 断开后 client 自动 backoff 重连，不 crash
 
 round-trip（上行 → server handler / 下行 → client._in_q）由 test_runtime_server.py 覆盖，
@@ -103,7 +103,7 @@ async def test_hello_carries_source_and_session_key():
         )
         client_task = asyncio.create_task(client.run())
         try:
-            await _wait_for(lambda: ("sX", "monodesk") in h.server._clients)
+            await _wait_for(lambda: "monodesk" in h.server._clients)
             assert h.server._last_active_source["sX"] == "monodesk"
         finally:
             await client.stop()
@@ -127,7 +127,7 @@ async def test_reconnects_after_server_restart():
     )
     client_task = asyncio.create_task(client.run())
     try:
-        await _wait_for(lambda: ("sX", "terminal") in h1.server._clients)
+        await _wait_for(lambda: "terminal" in h1.server._clients)
         # 关掉 server → ws 断开
         h1.stop()
         await asyncio.sleep(1.5)  # 让 backoff 跑至少一轮

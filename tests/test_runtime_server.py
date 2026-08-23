@@ -1,10 +1,10 @@
 """core/runtime_server.py 单测。
 
 真 ws client（websockets.sync）连真 ws server，验证：
-- hello 带 source + session_key → 按 (sk, src) 注册
+- hello 带 source + session_key → 按 source 注册
 - inbound → handler 收到 InboundEvent
-- per-session output_q 注册后，consumer 按 last_active_source 路由
-- 同 (sk, src) 重连 replace；同 sk 不同 src 允许多 conn
+- per-session output_q 注册后，consumer 按 last_active_source 路由到 source conn
+- 同 source 重连 replace
 - 死连接清理
 """
 from __future__ import annotations
@@ -344,12 +344,12 @@ def test_drop_dead_client():
         time.sleep(0.1)
         ws1.close()
         time.sleep(0.2)
-        # send 失败 → _clients 应清掉 (default, source)
+        # send 失败 → _clients 应清掉 source="monodesk"
         asyncio.run_coroutine_threadsafe(out_q.put(TokenChunk(text="x")), h._loop).result(timeout=2)
         # 给 consumer 时间尝试 + 清掉
         time.sleep(0.2)
-        # 不应再有 ("default", "monodesk") 的 conn
-        assert ("default", "monodesk") not in h.server._clients
+        # 不应再有 "monodesk" 的 conn
+        assert "monodesk" not in h.server._clients
     finally:
         h.stop()
 

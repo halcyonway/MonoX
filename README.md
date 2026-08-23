@@ -4,13 +4,13 @@ A minimal, self-use Agent Runtime. Code it, scratch it, keep it lean.
 
 **系统 = 模块 + 协议。** Runtime 进程跑核心（协议 + ReAct 引擎 + 存储/执行抽象），channel 作为 feature 通过协议接入。
 
-[MonoDesk](https://github.com/halcyonway/MonoDesk) 是桌面 UI channel 实现（独立仓库）。
+[MonoDesk](https://github.com/halcyonway/MonoDesk) 是桌面 UI channel（独立仓库，直接 ws 连 RuntimeServer，不走 in-process adapter）。
 
 ## Design philosophy
 
 - **Stable core, swappable adapters** — `core/` is the zero-UI / zero-IM / zero-LLM-SDK kernel. `extensions/` holds adapters that can be rewritten freely. `run.py` is the assembly layer.
 - **Protocol-first, duck-typed** — Cross-module boundaries use `Protocol` + frozen dataclasses. If it quacks like the protocol, it IS the protocol. Swapping an implementation touches nothing else.
-- **Runtime knows nothing about channels** — `RuntimeServer` only sees ws frames. Channel type / protocol is opaque to it.
+- **Runtime is the WS hub** — `RuntimeServer` is a plain ws server on :8765. Channels connect as clients; the runtime knows nothing about specific channel protocols.
 - **Multi-session in one process** — Multiple channels share the main session via `last_active_source` fan-out, or use independent `session_key`s.
 - **Config-driven** — `config.toml` owns all connection params. `run.py` reads only LLM / server / sandbox sections.
 
@@ -26,13 +26,13 @@ graph TB
         LLMP["llm_proxy/<br/>OpenAI stream"]
         Sandbox["sandbox/<br/>bash exec"]
         Memory["memory/<br/>long-term memory"]
-        Server["runtime_server/<br/>ws server"]
+        Server["runtime_server/<br/>ws server :8765"]
         Session["session_manager/<br/>multi-session + idle"]
         Health["health_server/<br/>:8767"]
     end
 
     subgraph Extensions["extensions/ (swappable adapters)"]
-        Channels["channels/<br/>terminal / monodesk / feishu / textual_chat"]
+        Channels["channels/<br/>in-process:<br/>terminal / feishu / textual_chat"]
         Skills["skills/<br/>memory-write / ..."]
     end
 
@@ -46,7 +46,7 @@ graph TB
     Session --> Server
     Health --> Session
 
-    Channels -.Channel protocol.-> Protocol
+    Channels -.RuntimeWSClient.-> Server
     Skills -.-> Loop
 
     Run --> Core
@@ -60,6 +60,10 @@ graph TB
     class Run run
 ```
 
+> 桌面 UI（MonoDesk）不通过 in-process channel 接入 —— 它走外部 ws client 直接连 :8765，
+  因为桌面 UI 跟 Runtime 不在同一进程（用户在 Mac/Win/Linux 桌面端跑 UI，本地跑 Runtime）。
+ 协议一样，进程模型不同。
+
 ## Quick start
 
 ```bash
@@ -70,12 +74,15 @@ graph TB
 export MINIMAX_API_KEY=eyJ...
 # Edit config.toml: api_base / api_key / model
 
-# 3. Start Runtime
+# 3. Start Runtime（启 ws server :8765）
 uv run python run.py
 
-# 4. Connect a channel (independent process, multiple concurrent)
-uv run python -m extensions.channels.terminal   # terminal TUI
-# MonoDesk desktop: https://github.com/halcyonway/MonoDesk
+# 4. Connect a channel
+# 4a. terminal TUI（in-process channel，独立进程）
+uv run python -m extensions.channels.terminal
+
+# 4b. MonoDesk 桌面 UI（外部 ws client，独立仓库）
+# 见 https://github.com/halcyonway/MonoDesk
 
 # 5. Check Runtime status
 curl http://127.0.0.1:8767/health
@@ -83,14 +90,15 @@ curl http://127.0.0.1:8767/health
 
 ## Channels
 
-| Channel | Description |
-|---|---|
-| terminal | stdio TUI |
-| monodesk | desktop app (separate repo: [MonoDesk](https://github.com/halcyonway/MonoDesk)) |
-| feishu | lark-oapi |
-| textual | textual full-screen TUI |
+| Channel | Description | 进程模型 |
+|---|---|---|
+| terminal | stdio TUI | in-process（独立进程跑 RuntimeWSClient 连 :8765） |
+| feishu | lark-oapi | in-process（独立进程跑 RuntimeWSClient 连 :8765） |
+| textual | textual full-screen TUI | in-process（独立进程跑 RuntimeWSClient 连 :8765） |
+| **monodesk** | 桌面 UI（[MonoDesk](https://github.com/halcyonway/MonoDesk)） | **外部**（独立 App，ws 连 :8765） |
 
-Channels 自带启动方式，详见各自代码。
+> 旧版本 `extensions/channels/monodesk/`（独立进程 ws server :8766）已废弃并删除。
+> 桌面 UI 现在跟其他 channel 用同一套 ws 协议，更简单（少一层端口、多 session 共用更顺）。
 
 ## Layout
 
@@ -101,12 +109,12 @@ core/                 # stable kernel
 ├── llm_proxy/        #   OpenAI-compatible stream
 ├── sandbox/          #   bash exec
 ├── memory/           #   long-term memory (FsMemoryStore)
-├── runtime_server.py #   ws server (:8765)
+├── runtime_server.py #   ws server (:8765) — 唯一对外入口
 ├── session_manager.py #  multi-session + idle
 ├── health_server.py  #   HTTP :8767
 └── config.py         #   config.toml loader
 extensions/           # adapters (rewritable)
-├── channels/         #   terminal / monodesk / feishu / textual_chat
+├── channels/         #   terminal / feishu / textual_chat (in-process RuntimeWSClient)
 └── skills/           #   SKILL.md (LLM-readable)
 run.py                # assembly entry
 config.toml           # runtime config

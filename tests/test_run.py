@@ -81,7 +81,6 @@ def test_run_stop_flag_and_pid_file():
     assert "stop_run" in src, "run.py should define stop_run()"
     assert run_mod.PID_FILE.name == "runtime.pid"
     assert 8765 in run_mod.DEFAULT_RUNTIME_PORTS
-    assert 8766 in run_mod.DEFAULT_RUNTIME_PORTS
     assert 8767 in run_mod.DEFAULT_RUNTIME_PORTS
 
 

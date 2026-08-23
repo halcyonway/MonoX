@@ -30,7 +30,7 @@ class TestFeishuChannel:
         assert ch._session_key == "test"
 
     def test_open_id_by_chat_populated(self, ch: FeishuChannel):
-        """_on_message 应该把 open_id 缓存到 _open_id_by_chat。"""
+        """_on_message 应该把 open_id 缓存到 _open_id_by_chat，同时记下 _last_chat_id。"""
         # 模拟 WS 线程里收到的消息事件
         mock_data = MagicMock()
         mock_event = MagicMock()
@@ -51,6 +51,9 @@ class TestFeishuChannel:
         ch._on_message(mock_data)
 
         assert ch._open_id_by_chat.get("oc_test_chat") == "ou_test123"
+        # send 路径靠 _last_chat_id 反查 open_id（session_key 跨 channel 共享 default 后
+        # 不再是 chat_id）。如果 send 时 _last_chat_id 为空会丢消息。
+        assert ch._last_chat_id == "oc_test_chat"
 
     def test_queue_reply_system_notify(self, ch: FeishuChannel):
         """_queue_reply 应该产生 event_type=system-notify 的事件。"""
