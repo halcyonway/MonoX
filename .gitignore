@@ -11,7 +11,10 @@ venv/
 *.log
 
 # runtime data directories (never commit)
+# .monox/ 包含 memory/ skills/ logs/ checkpoints/ 等运行时数据
 .monox/
+# 文件日志（按日期 monox-YYYY-MM-DD.log，可能含 LLM 请求/响应内容）
+.monox/logs/
 workspace/
 memory/
 tmp/

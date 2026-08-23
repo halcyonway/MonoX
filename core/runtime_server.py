@@ -278,7 +278,7 @@ class RuntimeServer:
                 ws = self._clients.get(src)
             if ws is None:
                 continue  # 该 source 已断开 → 丢弃
-            frame = to_frame(ev, seq=next(self._seq))
+            frame = to_frame(ev, session_key=session_key, seq=next(self._seq))
             if frame is None:
                 continue
             payload = json.dumps(frame, ensure_ascii=False, default=str)

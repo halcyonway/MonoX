@@ -55,7 +55,9 @@ def test_run_supports_in_process_channels():
     src = open(run_mod.__file__, "r").read()
     # 静态守护：run.py 只跑 Runtime，不拉 channel
     assert "_build_channel" not in src
-    assert "asyncio.gather(server.run(), health.run())" in src
+    # RuntimeServer + HealthServer 都通过 asyncio.gather 拉起来
+    assert "server.run()" in src and "health.run()" in src
+    assert "debug.run_server()" in src  # 可观测性 debug server 也一起跑
 
 
 def test_server_config_compatible_with_runtime_server():

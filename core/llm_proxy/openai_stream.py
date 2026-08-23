@@ -9,6 +9,7 @@ v0: 单模型 + 简单调用，无 retry/fallback（harness 后续在 LLMProxy �
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -16,6 +17,27 @@ import httpx
 
 from core.config import LLMConfig
 from core.protocol import LLMProxy, LlmChunk
+
+_log = logging.getLogger("monox.llm_proxy")
+
+
+def _normalize_usage(raw: dict[str, Any] | None) -> dict[str, Any] | None:
+    """把 OpenAI 风格的嵌套 usage 拍平，提取 cached_tokens 到顶层。
+
+    输入格式（OpenAI chat completion stream final chunk）：
+        {"prompt_tokens": N, "completion_tokens": M,
+         "prompt_tokens_details": {"cached_tokens": K}}
+    拍平后：
+        {"prompt_tokens": N, "completion_tokens": M, "cached_tokens": K}
+    缺字段就 None。
+    """
+    if raw is None:
+        return None
+    out = dict(raw)
+    details = out.pop("prompt_tokens_details", None) or {}
+    if isinstance(details, dict) and "cached_tokens" in details:
+        out["cached_tokens"] = details["cached_tokens"]
+    return out
 
 
 class OpenAIStreamProxy(LLMProxy):
@@ -48,6 +70,18 @@ class OpenAIStreamProxy(LLMProxy):
         if options:
             payload.update(options)
 
+        # 调试日志：记录请求 payload 中的关键字段，方便排查 usage 没回传等问题。
+        # stream_options.include_usage 是否被透传、messages 有几条、tools 有几个。
+        _log.info(
+            "llm request model=%s stream_options=%s msgs=%d tools=%d",
+            payload.get("model"),
+            payload.get("stream_options"),
+            len(messages),
+            len(tools) if tools else 0,
+        )
+
+        chunk_count = 0
+        usage_count = 0
         async with self._client.stream("POST", "/chat/completions", json=payload) as resp:
             resp.raise_for_status()
             async for line in resp.aiter_lines():
@@ -56,16 +90,27 @@ class OpenAIStreamProxy(LLMProxy):
                 data = line[6:]
                 if data == "[DONE]":
                     break
-                yield self._parse_chunk(json.loads(data))
+                chunk = self._parse_chunk(json.loads(data))
+                chunk_count += 1
+                if chunk.usage:
+                    usage_count += 1
+                yield chunk
+
+        _log.info(
+            "llm response model=%s chunks=%d chunks_with_usage=%d",
+            self._cfg.model,
+            chunk_count,
+            usage_count,
+        )
 
     @staticmethod
     def _parse_chunk(chunk: dict[str, Any]) -> LlmChunk:
         choices = chunk.get("choices") or []
         if not choices:
-            return LlmChunk(usage=chunk.get("usage"))
+            return LlmChunk(usage=_normalize_usage(chunk.get("usage")))
         delta = choices[0].get("delta") or {}
         finish = choices[0].get("finish_reason")
-        usage = chunk.get("usage")
+        usage = _normalize_usage(chunk.get("usage"))
         reasoning = delta.get("reasoning_content") or delta.get("reasoning")
         return LlmChunk(
             delta_text=delta.get("content"),

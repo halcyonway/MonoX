@@ -66,29 +66,57 @@ class CompressionService:
             return False
         return self._fold_earliest_turns(messages)[0] > 0
 
-    async def maybe_summarize(
+    async def _try_summarize(
         self,
         messages: list[dict[str, Any]],
         session_key: str,
-    ) -> list[dict[str, Any]]:
+    ) -> tuple[list[dict[str, Any]], str | None, int]:
+        """L2 折叠 + summary 的核心实现。返回 (new_messages, summary, folded_count)。
+
+        folded_count 是被折叠的消息数（=fold_end）；没折叠时为 0。
+        摘要失败 / 空摘要 → 不折叠，返回原 messages。
+        """
         if self._estimate_chars(messages) < self._l2_char_threshold:
-            return messages
+            return messages, None, 0
 
         fold_end, block = self._fold_earliest_turns(messages)
         if fold_end <= 0 or not block:
-            return messages
+            return messages, None, 0
 
         try:
             summary = await self._summarize(block)
         except Exception:
             # 摘要失败不能打爆主 loop，降级为不折叠
-            return messages
+            return messages, None, 0
 
         if not summary:
-            return messages
+            return messages, None, 0
 
         await self.maintain_memory(session_key, summary)
-        return messages[fold_end:]
+        return messages[fold_end:], summary, fold_end
+
+    async def maybe_summarize(
+        self,
+        messages: list[dict[str, Any]],
+        session_key: str,
+    ) -> list[dict[str, Any]]:
+        """L2 折叠（公开 API，back-compat）。返回折叠后的 messages。
+
+        想同时拿到 summary / folded_count（用于 trace），用 `summarize_for_trace`。
+        """
+        new, _, _ = await self._try_summarize(messages, session_key)
+        return new
+
+    async def summarize_for_trace(
+        self,
+        messages: list[dict[str, Any]],
+        session_key: str,
+    ) -> tuple[list[dict[str, Any]], str | None, int]:
+        """同 maybe_summarize，但额外返回 summary 文本和 folded_count。
+
+        给可观测性（record_compress_span）用；引擎调用一次拿齐三样东西。
+        """
+        return await self._try_summarize(messages, session_key)
 
     @staticmethod
     def _estimate_chars(messages: list[dict[str, Any]]) -> int:

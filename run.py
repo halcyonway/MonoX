@@ -32,6 +32,8 @@ import sys
 from pathlib import Path
 
 from core.config import Config, session_paths
+from core.logging_setup import setup_logging
+from core.debug_server import DebugServer, DebugServerConfig, FsTraceProvider
 from core.health_server import HealthServer, HealthServerConfig
 from core.llm_proxy import OpenAIStreamProxy
 from core.loop import (
@@ -47,6 +49,7 @@ from core.memory import FsMemoryStore
 from core.runtime_server import RuntimeServer
 from core.sandbox import BashRunner
 from core.session_manager import SessionManager
+import core.loop.event_format  # noqa: F401 — used by DEFAULT_SYSTEM 字符串拼接
 
 
 DEFAULT_SYSTEM = """You are MonoX, a coding agent. You run inside a sandboxed bash environment.
@@ -55,7 +58,9 @@ Plan briefly, then execute. Use bash for all I/O. Use skill_load to fetch detail
 
 Tool results may be L1-compressed; if you see budget_id, call read_tool_result_budget(budget_id=...) for the full version.
 
-When you are done with the current turn and ready to receive the next message, call wait_io. If the user sends a new message while you are mid-task, it will be appended to the conversation and you can keep going."""
+When you are done with the current turn and ready to receive the next message, call wait_io. If the user sends a new message while you are mid-task, it will be appended to the conversation and you can keep going.
+
+""" + core.loop.event_format.EVENT_SCHEMA_DOC
 
 
 _log = logging.getLogger("monox.runtime")
@@ -64,7 +69,7 @@ _log = logging.getLogger("monox.runtime")
 # run.py 自己的 PID 文件路径 + Runtime 默认占用的两个端口。
 # `--stop` 用 PID 文件找本进程；用端口扫残留（PID 文件丢失或之前 crash 留下的进程）。
 PID_FILE = Path(".monox/runtime.pid")
-DEFAULT_RUNTIME_PORTS = (8765, 8767)  # ws server / health
+DEFAULT_RUNTIME_PORTS = (8765, 8767, 8768)  # ws server / health / debug (trace)
 
 
 def _pid_alive(pid: int) -> bool:
@@ -210,7 +215,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--stop",
         action="store_true",
-        help="Kill any running Runtime (PID file + port sweep on :8765/:8767) and exit.",
+        help="Kill any running Runtime (PID file + port sweep on :8765/:8767/:8768) and exit.",
     )
     return parser.parse_args()
 
@@ -254,11 +259,12 @@ def _spawn_feishu(cfg: Config) -> subprocess.Popen | None:
 
 
 async def run(cfg_path: str, args: argparse.Namespace) -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [monox:%(name)s] %(levelname)s %(message)s",
-        stream=sys.stderr,
-    )
+    # 文件日志：写到 .monox/logs/monox-YYYY-MM-DD.log，按日期分。
+    # 调试 LLM 用量 / wire frame 时直接 tail 这个文件即可，不必去翻 systemd / docker。
+    log_dir = Path(".monox/logs")
+    out_path = setup_logging(log_dir=log_dir, level=logging.INFO)
+    if out_path is not None:
+        _log.info("file logging enabled → %s", out_path)
 
     # 写 PID 文件——`run.py --stop` 用它定位本进程；atexit + SIGINT/SIGTERM 触发清理。
     # 写在 logging 之后：日志初始化失败不会留孤儿 PID 文件。
@@ -350,9 +356,16 @@ async def run(cfg_path: str, args: argparse.Namespace) -> None:
         session_provider=session_mgr.active_sessions,
     )
 
+    # 可观测性 debug server（:8768）：trace / debug 接口给 MonoDesk 用。
+    debug_port = int(os.environ.get("MONOX_DEBUG_PORT", "8768"))
+    debug = DebugServer(
+        DebugServerConfig(host=cfg.server.host, port=debug_port),
+        trace_provider=FsTraceProvider(memory_root),
+    )
+
     print(
         f"[monox-runtime] ws :{cfg.server.port} (default_session_key={cfg.session_key!r}), "
-        f"health :{health_port}, idle_timeout={session_mgr._idle_timeout_sec}s",
+        f"health :{health_port}, debug :{debug_port}, idle_timeout={session_mgr._idle_timeout_sec}s",
         flush=True,
     )
 
@@ -361,13 +374,14 @@ async def run(cfg_path: str, args: argparse.Namespace) -> None:
 
     await session_mgr.start()
     try:
-        await asyncio.gather(server.run(), health.run())
+        await asyncio.gather(server.run(), health.run(), debug.run_server())
     finally:
         if feishu_proc is not None and feishu_proc.poll() is None:
             feishu_proc.terminate()
         await session_mgr.stop()
         await server.stop()
         await health.stop()
+        await debug.stop()
 
 
 if __name__ == "__main__":

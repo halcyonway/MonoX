@@ -13,14 +13,19 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 from typing import Any
 
+_log = logging.getLogger("monox.loop.engine")
+
 from core.loop.compression import CompressionService
-from core.loop.context import assemble_messages, format_tool_message
+from core.loop.context import assemble_messages
+from core.loop.event_format import tool_result_event_xml, user_input_event_xml
 from core.loop.metric import SessionMetric, StepMetric
 from core.loop.tool_registry import ToolRegistry
 from core.loop.tools.read_tr_budget import ReadToolResultBudgetTool
+from core.observability.collector import TraceCollector
 from core.protocol import (
     CheckpointRecord,
     CheckpointStore,
@@ -55,6 +60,7 @@ class LoopEngine:
         checkpoint: CheckpointStore,
         skill_summary: str,
         max_steps: int = 30,
+        traces: TraceCollector | None = None,
     ) -> None:
         self._session_key = session_key
         self._system = system_prompt
@@ -65,10 +71,15 @@ class LoopEngine:
         self._checkpoint = checkpoint
         self._skill_summary = skill_summary
         self._max_steps = max_steps
+        # 可观测性：可选的 trace 收集器；为 None 时整条 trace 路径不执行。
+        self._traces = traces
 
         self._messages: list[dict[str, Any]] = []
         self._step_idx = 0
         self._session_metric = SessionMetric()
+        # 当前 run / turn 的 trace_id，喂给 StatusChange / MetricChunk / FinalMessage。
+        self._run_id: str | None = None
+        self._current_turn_id: str | None = None
 
     async def run(
         self,
@@ -138,12 +149,26 @@ class LoopEngine:
                             self._messages = self._msgs_before
                             self._step_idx -= 1
                             self._session_metric.drop_last()
+                            # 可观测性：cancelled 路径关 run
+                            if self._traces is not None and self._run_id is not None:
+                                await self._traces.end_run(None, status="cancelled")
+                                self._run_id = None
+                                self._current_turn_id = None
                             await output_queue.put(StatusChange(state="idle"))
                             step_task = None
                             continue
                         await output_queue.put(
-                            FinalMessage(text=final_text, metrics=self._session_metric.snapshot())
+                            FinalMessage(
+                                text=final_text,
+                                metrics=self._session_metric.snapshot(),
+                                trace_id=self._run_id,
+                            )
                         )
+                        # 可观测性：正常结束 run
+                        if self._traces is not None and self._run_id is not None:
+                            await self._traces.end_run(final_text, status="ok")
+                            self._run_id = None
+                            self._current_turn_id = None
                         step_task = None
                         continue
 
@@ -173,10 +198,13 @@ class LoopEngine:
                         await sub_queue.put(first_non_interrupt)
                     continue
 
-                self._messages.append({"role": "user", "content": ev.text})
+                self._messages.append({"role": "user", "content": user_input_event_xml(ev)})
 
                 # react 前快照 messages；cancel 后回滚到该状态
                 self._msgs_before = list(self._messages)
+                # 可观测性：起一次新 run；记录后 self._run_id 可用于 stamp 后续事件
+                if self._traces is not None and self._run_id is None:
+                    self._run_id = await self._traces.begin_run(ev.text)
                 step_task = asyncio.create_task(
                     self._react(sub_queue, output_queue)
                 )
@@ -235,15 +263,36 @@ class LoopEngine:
 
             # 1) drain input_queue → aggregate 新 user 消息
             for ev in _drain(input_queue):
-                self._messages.append({"role": "user", "content": ev.text})
+                self._messages.append({"role": "user", "content": user_input_event_xml(ev)})
+
+            # 可观测性：每个 turn 起一个 turn span（必须在 L2 折叠之前，否则
+            # compress span 找不到 parent turn）。
+            if self._traces is not None and self._run_id is not None:
+                self._current_turn_id = await self._traces.begin_turn(self._step_idx)
 
             # 2) L2 压缩（若需要）→ L3 落 Memory → assemble + LLM stream
             if self._compression.should_compress(self._messages):
                 await output_queue.put(StatusChange(state="compressing"))
 
-            self._messages = await self._compression.maybe_summarize(
-                self._messages, self._session_key
+            self._messages, l2_summary, l2_folded = (
+                await self._compression.summarize_for_trace(
+                    self._messages, self._session_key
+                )
             )
+            # 可观测性：L2 真的折叠时才记一条 compress span（summary 非空 + folded > 0）。
+            if (
+                l2_summary is not None
+                and l2_folded > 0
+                and self._traces is not None
+                and self._current_turn_id is not None
+            ):
+                await self._traces.record_compress_span(
+                    self._current_turn_id,
+                    level="L2",
+                    summary=l2_summary,
+                    folded_count=l2_folded,
+                    budget_ids=None,
+                )
 
             # read_index 必须在 L2 之后，才能拿到刚写入 Memory 的 summary
             memory_index = await self._memory.read_index(self._session_key)
@@ -253,26 +302,77 @@ class LoopEngine:
             tool_schemas = self._tools.schemas()
 
             full_text = ""
+            reasoning_text = ""
             tool_calls: list[dict[str, Any]] = []
             finish_reason: str | None = None
             usage: dict | None = None
 
-            await output_queue.put(StatusChange(state="thinking"))
-            async for chunk in self._llm.stream(messages, tools=tool_schemas):
-                if chunk.delta_text:
-                    full_text += chunk.delta_text
-                    await output_queue.put(TokenChunk(text=chunk.delta_text))
-                if chunk.delta_reasoning:
-                    await output_queue.put(ReasoningChunk(text=chunk.delta_reasoning))
-                if chunk.delta_tool_calls:
-                    _merge_tool_calls(tool_calls, chunk.delta_tool_calls)
-                if chunk.finish_reason:
-                    finish_reason = chunk.finish_reason
-                if chunk.usage:
-                    usage = chunk.usage
+            await output_queue.put(
+                StatusChange(
+                    state="thinking",
+                    trace_id=self._run_id,
+                    turn_id=self._current_turn_id,
+                )
+            )
+            try:
+                async for chunk in self._llm.stream(messages, tools=tool_schemas):
+                    if chunk.delta_text:
+                        full_text += chunk.delta_text
+                        await output_queue.put(TokenChunk(text=chunk.delta_text))
+                    if chunk.delta_reasoning:
+                        reasoning_text += chunk.delta_reasoning
+                        await output_queue.put(ReasoningChunk(text=chunk.delta_reasoning))
+                    if chunk.delta_tool_calls:
+                        _merge_tool_calls(tool_calls, chunk.delta_tool_calls)
+                    if chunk.finish_reason:
+                        finish_reason = chunk.finish_reason
+                    if chunk.usage:
+                        usage = chunk.usage
+            except Exception as exc:
+                # 可观测性：LLM 失败也记一条 reasoning span，状态=error。
+                if self._traces is not None and self._current_turn_id is not None:
+                    await self._traces.record_llm_span(
+                        self._current_turn_id,
+                        model=_llm_model(self._llm),
+                        messages=messages,
+                        response_text=full_text,
+                        reasoning_content=reasoning_text or None,
+                        usage=usage,
+                        finish_reason=finish_reason,
+                        latency_ms=int((time.monotonic() - t0) * 1000),
+                        status="error",
+                    )
+                raise
 
             step_metric.latency_ms = int((time.monotonic() - t0) * 1000)
             step_metric.tokens = usage
+
+            # 调试日志：trace / MetricChunk 携带的 usage 状态。
+            # usage=None 通常意味着上游没传 stream_options.include_usage，
+            # 或者代理被换成了不支持该字段的实现 —— 从这条日志直接看出来。
+            cached = usage.get("cached_tokens") if isinstance(usage, dict) else None
+            _log.info(
+                "llm turn done step=%d latency_ms=%d prompt=%s completion=%s cached=%s",
+                step_metric.step_idx,
+                step_metric.latency_ms,
+                usage.get("prompt_tokens") if isinstance(usage, dict) else None,
+                usage.get("completion_tokens") if isinstance(usage, dict) else None,
+                cached,
+            )
+
+            # 可观测性：成功路径记录完整 reasoning span（messages in / out / usage）。
+            if self._traces is not None and self._current_turn_id is not None:
+                await self._traces.record_llm_span(
+                    self._current_turn_id,
+                    model=_llm_model(self._llm),
+                    messages=messages,
+                    response_text=full_text,
+                    reasoning_content=reasoning_text or None,
+                    usage=usage,
+                    finish_reason=finish_reason,
+                    latency_ms=step_metric.latency_ms,
+                    status="ok",
+                )
 
             # 3) final message 分支（agent 没调 tool 或 finish_reason=stop）
             if not tool_calls or finish_reason == "stop":
@@ -298,7 +398,7 @@ class LoopEngine:
                     return final_text
                 # 4b) 有新事件 → aggregate，继续 react
                 for ev in pending:
-                    self._messages.append({"role": "user", "content": ev.text})
+                    self._messages.append({"role": "user", "content": user_input_event_xml(ev)})
                 continue
 
             # 5) tool dispatch
@@ -326,13 +426,24 @@ class LoopEngine:
                         exit_code=0,
                     )
                     await output_queue.put(ToolEnd(name=name, result=result, latency_ms=0))
+                    # 可观测性：wait_io 是循环暂停信号，记一条 act span 让 UI 能渲染。
+                    if self._traces is not None and self._current_turn_id is not None:
+                        await self._traces.record_act_span(
+                            self._current_turn_id,
+                            tool_name=name,
+                            args=args,
+                            result=_tool_result_to_dict(result),
+                            latency_ms=0,
+                            status="ok",
+                        )
                     self._messages.append(
-                        {"role": "tool", "tool_call_id": call_id, "content": format_tool_message(result)}
+                        {"role": "tool", "tool_call_id": call_id, "content": tool_result_event_xml(call_id, result, tool=name)}
                     )
                     has_wait_io = True
                     continue
 
                 tool = self._tools.get(name)
+                tool_status = "ok"
                 if tool is None:
                     result = ToolResult(
                         call_id=call_id,
@@ -342,29 +453,71 @@ class LoopEngine:
                         exit_code=1,
                     )
                     latency_ms = 0
+                    tool_status = "error"
                 else:
                     t0 = time.monotonic()
-                    result = await tool.execute(call_id, args)
+                    try:
+                        result = await tool.execute(call_id, args)
+                    except Exception as exc:
+                        # 自定义 tool 实现可能直接 raise（非返回 status=error 的 ToolResult）。
+                        # 这里兜住，保证 trace 里能看到这条失败调用。
+                        result = ToolResult(
+                            call_id=call_id,
+                            status="error",
+                            stdout="",
+                            stderr=f"{type(exc).__name__}: {exc}",
+                            exit_code=-1,
+                        )
+                        tool_status = "error"
                     latency_ms = int((time.monotonic() - t0) * 1000)
+                    if result.status == "error":
+                        tool_status = "error"
 
                 # read_tool_result_budget 返回的是完整原始结果，不能再截断
+                was_truncated = result.truncated
                 if name != ReadToolResultBudgetTool.name:
                     result = self._compression.compress_tool_result(result)
 
                 await output_queue.put(ToolEnd(name=name, result=result, latency_ms=latency_ms))
 
+                # 可观测性：act span 记 tool 调用全貌（args / result / latency / status）。
+                if self._traces is not None and self._current_turn_id is not None:
+                    await self._traces.record_act_span(
+                        self._current_turn_id,
+                        tool_name=name,
+                        args=args,
+                        result=_tool_result_to_dict(result),
+                        latency_ms=latency_ms,
+                        status=tool_status,
+                    )
+                    # L1 实际发生了折叠（result.truncated 翻 True）才记 compress span。
+                    if not was_truncated and result.truncated:
+                        await self._traces.record_compress_span(
+                            self._current_turn_id,
+                            level="L1",
+                            summary=result.stdout[:200],  # 摘要：截断后前 200 字符
+                            folded_count=1,
+                            budget_ids=[result.budget_id] if result.budget_id else None,
+                        )
+
                 self._messages.append(
                     {
                         "role": "tool",
                         "tool_call_id": call_id,
-                        "content": format_tool_message(result),
+                        "content": tool_result_event_xml(call_id, result, tool=name),
                     }
                 )
 
             step_metric.tool_calls_count = len(tool_calls)
             self._session_metric.add(step_metric)
 
-            await output_queue.put(MetricChunk(metrics=step_metric.snapshot()))
+            await output_queue.put(
+                MetricChunk(
+                    metrics=step_metric.snapshot(),
+                    trace_id=self._run_id,
+                    turn_id=self._current_turn_id,
+                )
+            )
 
             await self._checkpoint.save(
                 CheckpointRecord(
@@ -401,6 +554,34 @@ def _safe_json(raw: Any) -> dict[str, Any]:
         return json.loads(raw)
     except (json.JSONDecodeError, TypeError):
         return {}
+
+
+def _llm_model(llm: Any) -> str:
+    """best-effort 从 LLMProxy 拿 model 名（不在 Protocol 里，做 duck-typing）。"""
+    # 优先：cfg.model（OpenAIStreamProxy 走这里）
+    cfg = getattr(llm, "_cfg", None)
+    if cfg is not None:
+        m = getattr(cfg, "model", None)
+        if isinstance(m, str) and m:
+            return m
+    # 退路：直接的 model 属性（测试 / 自定义 proxy）
+    m = getattr(llm, "model", None)
+    if isinstance(m, str) and m:
+        return m
+    return "unknown"
+
+
+def _tool_result_to_dict(result: ToolResult) -> dict[str, Any]:
+    """ToolResult → dict（trace span attributes 用）。"""
+    return {
+        "call_id": result.call_id,
+        "status": result.status,
+        "stdout": result.stdout,
+        "stderr": result.stderr,
+        "exit_code": result.exit_code,
+        "truncated": result.truncated,
+        "budget_id": result.budget_id,
+    }
 
 
 def _merge_tool_calls(accumulated: list[dict[str, Any]], delta: tuple[dict[str, Any], ...]) -> None:

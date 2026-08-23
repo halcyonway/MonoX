@@ -29,6 +29,7 @@ from core.loop.compression import CompressionService
 from core.loop.engine import LoopEngine
 from core.loop.tool_registry import ToolRegistry
 from core.memory import FsMemoryStore
+from core.observability import JsonlTraceStore, TraceCollector
 from core.protocol import InboundEvent, StreamEvent
 
 _log = logging.getLogger("monox.session_manager")
@@ -88,6 +89,7 @@ class SessionManager:
         time_fn: Callable[[], float] = time.time,
         idle_timeout_sec: float = IDLE_TIMEOUT_SEC,
         sweep_interval_sec: float = SWEEP_INTERVAL_SEC,
+        enable_traces: bool = True,
     ) -> None:
         self._llm = llm
         self._compression_llm = compression_llm
@@ -104,6 +106,8 @@ class SessionManager:
         self._time_fn = time_fn
         self._idle_timeout_sec = idle_timeout_sec
         self._sweep_interval_sec = sweep_interval_sec
+        # 可观测性：默认开 trace；core 改极少代码；测试可关
+        self._enable_traces = enable_traces
 
         self._sessions: dict[str, SessionLoop] = {}
         self._stop = asyncio.Event()
@@ -166,6 +170,14 @@ class SessionManager:
         ck_path.parent.mkdir(parents=True, exist_ok=True)
         checkpoint = JsonlCheckpointStore(ck_path)
 
+        # 可观测性：每个 session 一份独立的 JsonlTraceStore + TraceCollector
+        trace_collector: TraceCollector | None = None
+        if self._enable_traces:
+            trace_store = JsonlTraceStore(
+                self._memory_root / session_key / "traces.jsonl"
+            )
+            trace_collector = TraceCollector(trace_store, session_key)
+
         loop_engine = LoopEngine(
             session_key=session_key,
             system_prompt=self._system_prompt,
@@ -176,6 +188,7 @@ class SessionManager:
             checkpoint=checkpoint,
             skill_summary=self._skill_summary,
             max_steps=self._max_steps,
+            traces=trace_collector,
         )
 
         sl = SessionLoop(

@@ -60,17 +60,25 @@ class ToolEnd:
 @dataclass(frozen=True)
 class StatusChange:
     state: Literal["thinking", "tooling", "compressing", "wait_io", "idle"]
+    # 可观测性：当前 turn 所属 run / turn。客户端可忽略。
+    trace_id: str | None = None
+    turn_id: str | None = None
 
 
 @dataclass(frozen=True)
 class MetricChunk:
     metrics: dict[str, Any]
+    # 可观测性：metric chunk 所属 run / turn。
+    trace_id: str | None = None
+    turn_id: str | None = None
 
 
 @dataclass(frozen=True)
 class FinalMessage:
     text: str
     metrics: dict[str, Any] = field(default_factory=dict)
+    # 可观测性：本次 reply 所属 run。客户端可挂"看 trace"按钮。
+    trace_id: str | None = None
 
 
 @dataclass(frozen=True)

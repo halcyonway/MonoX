@@ -53,18 +53,21 @@ def test_inbound_outbound_types_disjoint():
 
 def test_to_frame_all_9_stream_events():
     cases = [
-        (StatusChange(state="thinking"), "status", {"state": "thinking"}),
-        (TokenChunk(text="hi"), "token", {"text": "hi"}),
-        (ReasoningChunk(text="r"), "reasoning", {"text": "r"}),
-        (ToolStart(name="bash", args={"cmd": "ls"}), "tool_start", {"name": "bash", "args": {"cmd": "ls"}}),
-        (MetricChunk(metrics={"steps": 1}), "metric", {"metrics": {"steps": 1}}),
-        (FinalMessage(text="done", metrics={"x": 1}), "final", {"text": "done", "metrics": {"x": 1}}),
-        (Card(data={"foo": 1}), "card", {"data": {"foo": 1}}),
+        (StatusChange(state="thinking"), "status", {"session_key": "s", "state": "thinking"}),
+        (TokenChunk(text="hi"), "token", {"session_key": "s", "text": "hi"}),
+        (ReasoningChunk(text="r"), "reasoning", {"session_key": "s", "text": "r"}),
+        (ToolStart(name="bash", args={"cmd": "ls"}), "tool_start",
+         {"session_key": "s", "name": "bash", "args": {"cmd": "ls"}}),
+        (MetricChunk(metrics={"steps": 1}), "metric",
+         {"session_key": "s", "metrics": {"steps": 1}}),
+        (FinalMessage(text="done", metrics={"x": 1}), "final",
+         {"session_key": "s", "text": "done", "metrics": {"x": 1}}),
+        (Card(data={"foo": 1}), "card", {"session_key": "s", "data": {"foo": 1}}),
         (ErrorEvent(code="E_TIMEOUT", msg="slow", retryable=True),
-         "error", {"code": "E_TIMEOUT", "msg": "slow", "retryable": True}),
+         "error", {"session_key": "s", "code": "E_TIMEOUT", "msg": "slow", "retryable": True}),
     ]
     for ev, expected_type, expected_data in cases:
-        f = to_frame(ev, seq=42)
+        f = to_frame(ev, session_key="s", seq=42)
         assert f["v"] == PROTOCOL_VERSION
         assert f["type"] == expected_type
         assert f["seq"] == 42
@@ -77,8 +80,9 @@ def test_to_frame_tool_end_includes_result_dict():
         call_id="c1", status="ok", stdout="o", stderr="",
         exit_code=0, artifacts=(File(name="a.txt", content=b"hi", mime="text/plain"),),
     )
-    f = to_frame(ToolEnd(name="bash", result=r, latency_ms=123), seq=1)
+    f = to_frame(ToolEnd(name="bash", result=r, latency_ms=123), session_key="s", seq=1)
     assert f["type"] == "tool_end"
+    assert f["data"]["session_key"] == "s"
     assert f["data"]["name"] == "bash"
     assert f["data"]["latency_ms"] == 123
     assert f["data"]["result"]["call_id"] == "c1"
@@ -88,11 +92,43 @@ def test_to_frame_tool_end_includes_result_dict():
     ]
 
 
+def test_to_frame_session_key_always_present():
+    """回归测试：每个出站 frame 必须带 session_key —— 这是 MonoDesk 路由的依赖。
+    如果 to_frame 漏掉某个分支忘了加 session_key，客户端会拿不到路由信息
+    退回到 streamKeyRef hack，于是跨 session 事件污染就回来了。"""
+    events = [
+        StatusChange(state="thinking"),
+        TokenChunk(text="x"),
+        ReasoningChunk(text="y"),
+        ToolStart(name="bash", args={"cmd": "ls"}),
+        ToolEnd(name="bash", result=ToolResult(call_id="c", status="ok", stdout="", stderr="", exit_code=0), latency_ms=10),
+        MetricChunk(metrics={"x": 1}),
+        FinalMessage(text="done", metrics={}),
+        Card(data={"foo": 1}),
+        ErrorEvent(code="E", msg="m", retryable=False),
+    ]
+    for ev in events:
+        f = to_frame(ev, session_key="test-sk")
+        assert f is not None, f"to_frame returned None for {type(ev).__name__}"
+        assert "session_key" in f["data"], f"missing session_key for {type(ev).__name__}"
+        assert f["data"]["session_key"] == "test-sk"
+
+
 def test_to_frame_unknown_returns_none():
     # 未知事件类型
     class Weird:
         pass
-    assert to_frame(Weird(), seq=0) is None
+    assert to_frame(Weird(), session_key="s", seq=0) is None
+
+
+def test_to_frame_requires_session_key_kwarg():
+    # 防止有人误用 positional session_key —— 它必须是 keyword argument，
+    # 避免和未来的 seq 参数位置冲突。
+    import inspect
+    sig = inspect.signature(to_frame)
+    params = list(sig.parameters.values())
+    assert params[1].name == "session_key"
+    assert params[1].kind == inspect.Parameter.KEYWORD_ONLY
 
 
 # ----------------------------------------------------------------------
@@ -229,7 +265,7 @@ def test_frame_to_stream_event_tool_end_round_trip():
         result=ToolResult(call_id="c1", status="ok", stdout="o", stderr="",
                           exit_code=0, artifacts=(File(name="a", content=b"x"),)),
         latency_ms=99,
-    ), seq=1)
+    ), session_key="s", seq=1)
     decoded = frame_to_stream_event(f)
     assert isinstance(decoded, ToolEnd)
     assert decoded.name == "bash"
@@ -240,11 +276,68 @@ def test_frame_to_stream_event_tool_end_round_trip():
 
 
 def test_frame_to_stream_event_final():
-    f = to_frame(FinalMessage(text="done", metrics={"x": 1}), seq=1)
+    f = to_frame(FinalMessage(text="done", metrics={"x": 1}), session_key="s", seq=1)
     decoded = frame_to_stream_event(f)
     assert isinstance(decoded, FinalMessage)
     assert decoded.text == "done"
     assert decoded.metrics == {"x": 1}
+
+
+def test_trace_id_round_trips_on_status_metric_final():
+    """可观测性：StatusChange / MetricChunk / FinalMessage 的 trace_id / turn_id
+    序列化 + 反序列化保持一致；None / 缺字段都不破坏旧 client 解码。"""
+    # Status
+    f = to_frame(StatusChange(state="thinking", trace_id="t_1", turn_id="u_1"),
+                 session_key="s")
+    assert f["data"]["trace_id"] == "t_1"
+    assert f["data"]["turn_id"] == "u_1"
+    assert f["data"]["session_key"] == "s"
+    dec = frame_to_stream_event(f)
+    assert isinstance(dec, StatusChange)
+    assert dec.trace_id == "t_1"
+    assert dec.turn_id == "u_1"
+    # 不带 trace_id 也工作（旧 client）
+    f = to_frame(StatusChange(state="thinking"), session_key="s")
+    assert "trace_id" not in f["data"]
+    assert f["data"]["session_key"] == "s"
+    dec = frame_to_stream_event(f)
+    assert isinstance(dec, StatusChange)
+    assert dec.trace_id is None
+    # Metric
+    f = to_frame(MetricChunk(metrics={"x": 1}, trace_id="t_1", turn_id="u_1"),
+                 session_key="s")
+    assert f["data"]["trace_id"] == "t_1"
+    dec = frame_to_stream_event(f)
+    assert isinstance(dec, MetricChunk)
+    assert dec.trace_id == "t_1" and dec.turn_id == "u_1"
+    # Final
+    f = to_frame(FinalMessage(text="done", metrics={}, trace_id="t_1"),
+                 session_key="s")
+    assert f["data"]["trace_id"] == "t_1"
+    dec = frame_to_stream_event(f)
+    assert isinstance(dec, FinalMessage)
+    assert dec.trace_id == "t_1"
+
+
+def test_legacy_client_ignores_trace_id_field():
+    """旧客户端只读 state / metrics / text；frame 里多 trace_id / turn_id 字段不应报错。"""
+    f = to_frame(StatusChange(state="thinking", trace_id="t_1", turn_id="u_1"),
+                 session_key="s")
+    # 模拟旧 client：只读 state
+    assert f["type"] == "status"
+    assert f["data"]["state"] == "thinking"
+    # trace_id / turn_id 是 additive 字段，旧 client 解码忽略无害
+
+
+def test_legacy_frame_without_trace_id_decodes_with_none():
+    """MonoX 老版本发的 frame 没 trace_id 字段；新 client 解码 trace_id=None。"""
+    f = {
+        "v": 1, "type": "status", "seq": 0, "ts": 0,
+        "data": {"state": "thinking"},
+    }
+    dec = frame_to_stream_event(f)
+    assert isinstance(dec, StatusChange)
+    assert dec.trace_id is None and dec.turn_id is None
 
 
 def test_frame_to_stream_event_card_and_error():
@@ -264,7 +357,7 @@ def test_frame_to_stream_event_unknown_returns_none():
 # ----------------------------------------------------------------------
 
 def test_encode_decode_round_trip():
-    f = to_frame(TokenChunk(text="hello"), seq=3)
+    f = to_frame(TokenChunk(text="hello"), session_key="s", seq=3)
     raw = encode(f)
     assert isinstance(raw, str)
     decoded = decode(raw)

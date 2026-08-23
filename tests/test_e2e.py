@@ -266,13 +266,19 @@ async def test_chat_only_persists_across_restart() -> None:
         try: await t
         except: pass
 
-    # 第一次 LLM 调用时 messages 必须包含上次的 user message "hi there"
+    # 第一次 LLM 调用时 messages 必须包含上次的 user message "hi there"。
+    # user message 现在用 XML event 包装（user_input kind），body 在 element 内。
     assert len(captured_messages) >= 1
     first_call_msgs = captured_messages[0]
     user_texts = [m["content"] for m in first_call_msgs if m["role"] == "user"]
-    assert "hi there" in user_texts, (
+    assert any("hi there" in c for c in user_texts), (
         f"previous user message missing after restart; got {user_texts!r}"
     )
+    # 而且每条 user message 都是合法 XML event
+    for c in user_texts:
+        assert "<event" in c and ('kind="user_input"' in c)
+        import xml.etree.ElementTree as ET
+        ET.fromstring(c)  # well-formed XML
     print("test_chat_only_persists_across_restart PASSED ✓")
 
 

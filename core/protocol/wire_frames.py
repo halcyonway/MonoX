@@ -127,41 +127,59 @@ def hello_frame(session_key: str, model: str, seq: int = 0) -> dict[str, Any]:
     )
 
 
-def to_frame(event: StreamEvent, seq: int = 0) -> dict[str, Any] | None:
+def to_frame(event: StreamEvent, *, session_key: str, seq: int = 0) -> dict[str, Any] | None:
     """StreamEvent → wire frame。
 
     非 StreamEvent 9 类的对象返回 None，调用方负责丢弃。
+
+    每个出站帧的 `data` 都嵌入 `session_key`——客户端用它路由事件到正确的会话
+    Map entry，避免「A 的 late event 写到 B 的视图」这类跨 session 污染。
+    session_key 由 RuntimeServer._outbound_consumer 在拉 per-session output_q 时
+    注入（它天然持有 session_key）。
     """
+    data: dict[str, Any] = {"session_key": session_key}
     if isinstance(event, StatusChange):
-        data: dict[str, Any] = {"state": event.state}
+        data["state"] = event.state
+        if event.trace_id is not None:
+            data["trace_id"] = event.trace_id
+        if event.turn_id is not None:
+            data["turn_id"] = event.turn_id
         ftype = FrameType.STATUS
     elif isinstance(event, TokenChunk):
-        data = {"text": event.text}
+        data["text"] = event.text
         ftype = FrameType.TOKEN
     elif isinstance(event, ReasoningChunk):
-        data = {"text": event.text}
+        data["text"] = event.text
         ftype = FrameType.REASONING
     elif isinstance(event, ToolStart):
-        data = {"name": event.name, "args": event.args}
+        data["name"] = event.name
+        data["args"] = event.args
         ftype = FrameType.TOOL_START
     elif isinstance(event, ToolEnd):
-        data = {
-            "name": event.name,
-            "latency_ms": event.latency_ms,
-            "result": _tool_result_to_dict(event.result),
-        }
+        data["name"] = event.name
+        data["latency_ms"] = event.latency_ms
+        data["result"] = _tool_result_to_dict(event.result)
         ftype = FrameType.TOOL_END
     elif isinstance(event, MetricChunk):
-        data = {"metrics": event.metrics}
+        data["metrics"] = event.metrics
+        if event.trace_id is not None:
+            data["trace_id"] = event.trace_id
+        if event.turn_id is not None:
+            data["turn_id"] = event.turn_id
         ftype = FrameType.METRIC
     elif isinstance(event, FinalMessage):
-        data = {"text": event.text, "metrics": event.metrics}
+        data["text"] = event.text
+        data["metrics"] = event.metrics
+        if event.trace_id is not None:
+            data["trace_id"] = event.trace_id
         ftype = FrameType.FINAL
     elif isinstance(event, Card):
-        data = {"data": event.data}
+        data["data"] = event.data
         ftype = FrameType.CARD
     elif isinstance(event, ErrorEvent):
-        data = {"code": event.code, "msg": event.msg, "retryable": event.retryable}
+        data["code"] = event.code
+        data["msg"] = event.msg
+        data["retryable"] = event.retryable
         ftype = FrameType.ERROR
     else:
         return None
@@ -282,7 +300,11 @@ def frame_to_stream_event(payload: Any) -> StreamEvent | None:
         state = data.get("state")
         if state not in ("thinking", "tooling", "compressing", "wait_io", "idle"):
             return None
-        return StatusChange(state=state)  # type: ignore[arg-type]
+        return StatusChange(
+            state=state,  # type: ignore[arg-type]
+            trace_id=data.get("trace_id"),
+            turn_id=data.get("turn_id"),
+        )
     if mtype == FrameType.TOKEN:
         return TokenChunk(text=data.get("text", "") or "")
     if mtype == FrameType.REASONING:
@@ -324,11 +346,16 @@ def frame_to_stream_event(payload: Any) -> StreamEvent | None:
             latency_ms=int(data.get("latency_ms", 0) or 0),
         )
     if mtype == FrameType.METRIC:
-        return MetricChunk(metrics=data.get("metrics") or {})
+        return MetricChunk(
+            metrics=data.get("metrics") or {},
+            trace_id=data.get("trace_id"),
+            turn_id=data.get("turn_id"),
+        )
     if mtype == FrameType.FINAL:
         return FinalMessage(
             text=data.get("text", "") or "",
             metrics=data.get("metrics") or {},
+            trace_id=data.get("trace_id"),
         )
     if mtype == FrameType.CARD:
         return Card(data=data.get("data") or {})

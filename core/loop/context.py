@@ -1,7 +1,10 @@
-"""Context 组装 + L1 工具结果压缩。"""
+"""Context 组装 + L1 工具结果压缩。
+
+注意：tool 消息的 content 现在用 XML event 格式（见 core.loop.event_format），
+不是 JSON 字符串。XML schema 文档会注入 system prompt，让 LLM 知道怎么读。
+"""
 from __future__ import annotations
 
-import json
 import uuid
 from typing import Any
 
@@ -56,15 +59,10 @@ def compress_tool_result(
     )
 
 
-def format_tool_message(result: ToolResult) -> str:
-    return json.dumps(
-        {
-            "status": result.status,
-            "stdout": result.stdout,
-            "stderr": result.stderr,
-            "exit_code": result.exit_code,
-            "truncated": result.truncated,
-            "budget_id": result.budget_id,
-        },
-        ensure_ascii=False,
-    )
+def format_tool_message(result: ToolResult, *, tool: str | None = None) -> str:
+    """DEPRECATED：tool 消息 content 现在由 core.loop.event_format.tool_result_event_xml 生成。
+
+    保留仅为向后兼容测试。新代码请用 tool_result_event_xml(call_id, result, tool=tool_name)。
+    """
+    from core.loop.event_format import tool_result_event_xml
+    return tool_result_event_xml("", result, tool=tool)
