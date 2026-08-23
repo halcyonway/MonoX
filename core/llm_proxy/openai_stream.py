@@ -91,6 +91,7 @@ class OpenAIStreamProxy(LLMProxy):
                 if data == "[DONE]":
                     break
                 chunk = self._parse_chunk(json.loads(data))
+                _log.debug("raw chunk usage=%r", chunk.usage)
                 chunk_count += 1
                 if chunk.usage:
                     usage_count += 1

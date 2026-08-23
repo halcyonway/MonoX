@@ -41,6 +41,7 @@ from core.protocol import (
     ToolResult,
     ToolStart,
 )
+from core.skill_service import SkillService
 
 
 WAIT_IO_NAME = "wait_io"
@@ -57,7 +58,7 @@ class LoopEngine:
         compression: CompressionService,
         memory: MemoryStore,
         checkpoint: CheckpointStore,
-        skill_summary: str,
+        skill_service: SkillService | None = None,
         path_vars: dict[str, str] | None = None,
         max_steps: int = 30,
         traces: TraceCollector | None = None,
@@ -69,7 +70,7 @@ class LoopEngine:
         self._compression = compression
         self._memory = memory
         self._checkpoint = checkpoint
-        self._skill_summary = skill_summary
+        self._skill_service = skill_service
         self._path_vars = path_vars or {}
         self._max_steps = max_steps
         # 可观测性：可选的 trace 收集器；为 None 时整条 trace 路径不执行。
@@ -328,7 +329,7 @@ class LoopEngine:
             messages = assemble_messages(
                 self._system,
                 memory_index,
-                self._skill_summary,
+                self._skill_service,
                 self._messages,
                 self._path_vars,
             )

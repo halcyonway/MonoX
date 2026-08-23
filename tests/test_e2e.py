@@ -22,7 +22,6 @@ from tests._inprocess_bridge import InProcessBridge
 from core.loop.checkpoint import JsonlCheckpointStore
 from core.loop.compression import CompressionService
 from core.loop.engine import LoopEngine
-from core.loop.skill_summary import SkillSummaryLoader
 from core.loop.tool_registry import ToolRegistry
 from core.loop.tools import BashTool, ReadToolResultBudgetTool, SkillLoadTool, WaitIoTool
 from core.memory import FsMemoryStore
@@ -36,6 +35,7 @@ from core.protocol import (
     StreamEvent,
 )
 from core.sandbox import BashRunner
+from core.skill_service import SkillService
 
 
 class MockLLM(LLMProxy):
@@ -83,20 +83,20 @@ class MockChannel(Channel):
             self._final_done.set()
 
 
-def build(tmp: Path) -> tuple[ToolRegistry, FsMemoryStore, JsonlCheckpointStore, str]:
+def build(tmp: Path) -> tuple[ToolRegistry, FsMemoryStore, JsonlCheckpointStore, SkillService]:
     ws = tmp / "ws"; ws.mkdir(parents=True, exist_ok=True)
     mem = tmp / "mem"; mem.mkdir(exist_ok=True)
     skills = tmp / "skills"; skills.mkdir(exist_ok=True)
 
     runner = BashRunner()
     budget = ReadToolResultBudgetTool()
+    skill_service = SkillService(skills)
     tools = ToolRegistry([
-        BashTool(runner, ws), SkillLoadTool(skills), WaitIoTool(), budget,
+        BashTool(runner, ws), SkillLoadTool(skill_service), WaitIoTool(), budget,
     ])
     mem_store = FsMemoryStore(mem)
     ck = JsonlCheckpointStore(mem / "default" / "checkpoint.jsonl")
-    skill_sum = SkillSummaryLoader(skills).summary()
-    return tools, mem_store, ck, skill_sum
+    return tools, mem_store, ck, skill_service
 
 
 def make_compression(tools: ToolRegistry, llm, mem_store: FsMemoryStore) -> CompressionService:
@@ -107,11 +107,11 @@ def make_compression(tools: ToolRegistry, llm, mem_store: FsMemoryStore) -> Comp
 
 
 async def run_pipeline(tmp: Path, llm: MockLLM, events: list[InboundEvent]) -> MockChannel:
-    tools, mem_store, ck, skill_sum = build(tmp)
+    tools, mem_store, ck, skill_service = build(tmp)
     loop = LoopEngine(
         session_key="default", system_prompt="test",
         llm=llm, tools=tools, compression=make_compression(tools, llm, mem_store),
-        memory=mem_store, checkpoint=ck, skill_summary=skill_sum,
+        memory=mem_store, checkpoint=ck, skill_service=skill_service,
     )
     ch = MockChannel(events)
     iq: asyncio.Queue[InboundEvent] = asyncio.Queue()
@@ -186,11 +186,11 @@ async def test_queue_aggregate_continues_react() -> None:
         [LlmChunk(delta_text="second reply"), LlmChunk(finish_reason="stop")],
     ], step_delay=0.3)
 
-    tools, mem_store, ck, skill_sum = build(tmp)
+    tools, mem_store, ck, skill_service = build(tmp)
     loop = LoopEngine(
         session_key="default", system_prompt="test",
         llm=llm, tools=tools, compression=make_compression(tools, llm, mem_store),
-        memory=mem_store, checkpoint=ck, skill_summary=skill_sum,
+        memory=mem_store, checkpoint=ck, skill_service=skill_service,
     )
     ch = MockChannel([InboundEvent(session_key="default", kind="message", text="first")])
     iq: asyncio.Queue[InboundEvent] = asyncio.Queue()
@@ -245,12 +245,12 @@ async def test_chat_only_persists_across_restart() -> None:
             captured_messages.append(list(messages))
             yield LlmChunk(delta_text="remembered", finish_reason="stop")
 
-    tools, mem_store, ck, skill_sum = build(tmp)
+    tools, mem_store, ck, skill_service = build(tmp)
     capturing_llm = CapturingLLM()
     loop = LoopEngine(
         session_key="default", system_prompt="test",
         llm=capturing_llm, tools=tools, compression=make_compression(tools, capturing_llm, mem_store),
-        memory=mem_store, checkpoint=ck, skill_summary=skill_sum,
+        memory=mem_store, checkpoint=ck, skill_service=skill_service,
     )
     ch2 = MockChannel([InboundEvent(session_key="default", kind="message", text="again")])
     iq: asyncio.Queue[InboundEvent] = asyncio.Queue()
@@ -335,7 +335,7 @@ async def test_l2_compression_folds_early_turns() -> None:
                 yield LlmChunk(delta_text="final answer", finish_reason="stop")
 
     llm = L2LLM()
-    tools, mem_store, ck, skill_sum = build(tmp)
+    tools, mem_store, ck, skill_service = build(tmp)
     compression = CompressionService(
         budget_tool=tools.get("read_tool_result_budget"),
         llm=llm,
@@ -344,7 +344,7 @@ async def test_l2_compression_folds_early_turns() -> None:
     loop = LoopEngine(
         session_key="default", system_prompt="test",
         llm=llm, tools=tools, compression=compression,
-        memory=mem_store, checkpoint=ck, skill_summary=skill_sum,
+        memory=mem_store, checkpoint=ck, skill_service=skill_service,
     )
     ch = MockChannel([])
     iq: asyncio.Queue[InboundEvent] = asyncio.Queue()

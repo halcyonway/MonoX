@@ -44,11 +44,11 @@ from core.loop import (
     WaitIoTool,
 )
 from core.loop.compression import CompressionService
-from core.loop.skill_summary import SkillSummaryLoader
 from core.memory import FsMemoryStore
 from core.runtime_server import RuntimeServer
 from core.sandbox import BashRunner
 from core.session_manager import SessionManager
+from core.skill_service import SkillService
 import core.loop.event_format  # noqa: F401 — used by DEFAULT_SYSTEM_TEMPLATE 字符串拼接
 
 
@@ -357,17 +357,18 @@ async def run(cfg_path: str, args: argparse.Namespace) -> None:
 
     runner = BashRunner()
     budget_tool = ReadToolResultBudgetTool()
+    skills_root = Path(cfg.sandbox.skills_root)
+    skill_service = SkillService(skills_root, max_l1=cfg.sandbox.skills_max_l1)
     tools = ToolRegistry(
         [
             BashTool(runner, paths["workspace"]),
-            SkillLoadTool(Path(cfg.sandbox.skills_root)),
+            SkillLoadTool(skill_service),
             WaitIoTool(),
             budget_tool,
         ]
     )
 
     memory = FsMemoryStore(Path(cfg.sandbox.memory_root))
-    skill_summary = SkillSummaryLoader(Path(cfg.sandbox.skills_root)).summary()
     if cfg.compression_llm is None:
         raise RuntimeError(
             "missing [llm.compression]: a compression model is required; "
@@ -407,7 +408,7 @@ async def run(cfg_path: str, args: argparse.Namespace) -> None:
         state_root=state_root,
         traces_root=traces_root,
         system_prompt=render_default_system(cfg),
-        skill_summary=skill_summary,
+        skill_service=skill_service,
         path_vars=build_path_vars(cfg),
         outbound_register=_register,
         outbound_unregister=_unregister,
@@ -426,6 +427,7 @@ async def run(cfg_path: str, args: argparse.Namespace) -> None:
     debug = DebugServer(
         DebugServerConfig(host=cfg.server.host, port=debug_port),
         trace_provider=FsTraceProvider(traces_root),
+        skill_service=skill_service,
     )
 
     print(

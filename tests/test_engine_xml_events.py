@@ -112,8 +112,7 @@ def _build_engine(
         compression=compression,
         memory=mem,
         checkpoint=ck,
-        skill_summary="",
-        max_steps=5,
+                max_steps=5,
     )
     return engine, asyncio.Queue(), asyncio.Queue()
 

@@ -31,6 +31,7 @@ from core.loop.tool_registry import ToolRegistry
 from core.memory import FsMemoryStore
 from core.observability import JsonlTraceStore, TraceCollector
 from core.protocol import InboundEvent, StreamEvent
+from core.skill_service import SkillService
 
 _log = logging.getLogger("monox.session_manager")
 
@@ -83,7 +84,7 @@ class SessionManager:
         state_root: Path,
         traces_root: Path,
         system_prompt: str,
-        skill_summary: str,
+        skill_service: SkillService | None = None,
         path_vars: dict[str, str] | None = None,
         max_steps: int = 30,
         outbound_register: OutboundRegister | None = None,
@@ -103,7 +104,7 @@ class SessionManager:
         self._state_root = state_root
         self._traces_root = traces_root
         self._system_prompt = system_prompt
-        self._skill_summary = skill_summary
+        self._skill_service = skill_service
         self._max_steps = max_steps
         self._outbound_register = outbound_register
         self._outbound_unregister = outbound_unregister
@@ -192,7 +193,7 @@ class SessionManager:
             compression=self._compression,
             memory=self._memory,
             checkpoint=checkpoint,
-            skill_summary=self._skill_summary,
+            skill_service=self._skill_service,
             path_vars=self._path_vars,
             max_steps=self._max_steps,
             traces=trace_collector,
