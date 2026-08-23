@@ -3,7 +3,7 @@
 ## 目标与边界
 
 - 压缩只作用于**当前 session** 的 `messages`，不写跨 session Memory。
-- 跨 session 记忆仍由 agent 通过 `memory-write` skill + `MemoryStore.read_index` 注入；压缩不碰。
+- 跨会话记忆由 `MemoryStore.read_index` 注入到 system prompt（见 `memory.md`）；压缩不碰。
 - 因此**不再有 L3**。`CompressionService` 不依赖 `MemoryStore`。
 
 ## 协议

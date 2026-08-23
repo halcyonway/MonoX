@@ -103,7 +103,6 @@ def make_compression(tools: ToolRegistry, llm, mem_store: FsMemoryStore) -> Comp
     return CompressionService(
         budget_tool=tools.get("read_tool_result_budget"),
         llm=llm,
-        memory=mem_store,
     )
 
 
@@ -340,7 +339,6 @@ async def test_l2_compression_folds_early_turns() -> None:
     compression = CompressionService(
         budget_tool=tools.get("read_tool_result_budget"),
         llm=llm,
-        memory=mem_store,
         l2_char_threshold=100,
     )
     loop = LoopEngine(
@@ -368,9 +366,7 @@ async def test_l2_compression_folds_early_turns() -> None:
     final = next(e for e in ch._sent if isinstance(e, FinalMessage))
     assert "final answer" in final.text
     assert any(isinstance(e, StatusChange) and e.state == "compressing" for e in ch._sent)
-    memory_md = tmp / "mem" / "default" / "Memory.md"
-    assert memory_md.exists()
-    assert "folded summary" in memory_md.read_text()
+    # L3 已删除：压缩摘要不再自动落 Memory.md。
     print("test_l2_compression_folds_early_turns PASSED ✓")
 
 

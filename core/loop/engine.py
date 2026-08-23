@@ -27,7 +27,6 @@ from core.loop.tool_registry import ToolRegistry
 from core.loop.tools.read_tr_budget import ReadToolResultBudgetTool
 from core.observability.collector import TraceCollector
 from core.protocol import (
-    CheckpointRecord,
     CheckpointStore,
     FinalMessage,
     InboundEvent,
@@ -59,6 +58,7 @@ class LoopEngine:
         memory: MemoryStore,
         checkpoint: CheckpointStore,
         skill_summary: str,
+        path_vars: dict[str, str] | None = None,
         max_steps: int = 30,
         traces: TraceCollector | None = None,
     ) -> None:
@@ -70,6 +70,7 @@ class LoopEngine:
         self._memory = memory
         self._checkpoint = checkpoint
         self._skill_summary = skill_summary
+        self._path_vars = path_vars or {}
         self._max_steps = max_steps
         # 可观测性：可选的 trace 收集器；为 None 时整条 trace 路径不执行。
         self._traces = traces
@@ -198,7 +199,13 @@ class LoopEngine:
                         await sub_queue.put(first_non_interrupt)
                     continue
 
-                self._messages.append({"role": "user", "content": user_input_event_xml(ev)})
+                user_msg = {"role": "user", "content": user_input_event_xml(ev)}
+                self._messages.append(user_msg)
+                # 持久化：用户消息到达是稳定边界，立刻 append
+                await self._checkpoint.append(
+                    self._session_key,
+                    {"kind": "msg", **user_msg},
+                )
 
                 # react 前快照 messages；cancel 后回滚到该状态
                 self._msgs_before = list(self._messages)
@@ -238,11 +245,17 @@ class LoopEngine:
             raise
 
     async def _restore(self) -> None:
-        ck = await self._checkpoint.load_latest(self._session_key)
-        if ck is None:
+        """从 append-only checkpoint log 重建状态。
+
+        load_messages 从最近的 compact 节点开始 replay msg 事件；空文件返回 []。
+        step_idx 推算为恢复后 messages 里 assistant 消息数（每个 assistant 对应一个 react step）。
+        """
+        msgs = await self._checkpoint.load_messages(self._session_key)
+        if not msgs:
             return
-        self._messages = list(ck.messages)
-        self._step_idx = ck.step_idx + 1
+        self._messages = list(msgs)
+        # 每个 assistant message 对应一次 react step 完成
+        self._step_idx = sum(1 for m in msgs if m.get("role") == "assistant")
 
     @staticmethod
     async def _await_step(t: asyncio.Task) -> str:
@@ -263,22 +276,38 @@ class LoopEngine:
 
             # 1) drain input_queue → aggregate 新 user 消息
             for ev in _drain(input_queue):
-                self._messages.append({"role": "user", "content": user_input_event_xml(ev)})
+                msg = {"role": "user", "content": user_input_event_xml(ev)}
+                self._messages.append(msg)
+                await self._checkpoint.append(
+                    self._session_key,
+                    {"kind": "msg", **msg},
+                )
 
             # 可观测性：每个 turn 起一个 turn span（必须在 L2 折叠之前，否则
             # compress span 找不到 parent turn）。
             if self._traces is not None and self._run_id is not None:
                 self._current_turn_id = await self._traces.begin_turn(self._step_idx)
 
-            # 2) L2 压缩（若需要）→ L3 落 Memory → assemble + LLM stream
+            # 2) L2 压缩（若需要）→ assemble + LLM stream
             if self._compression.should_compress(self._messages):
                 await output_queue.put(StatusChange(state="compressing"))
 
             self._messages, l2_summary, l2_folded = (
-                await self._compression.summarize_for_trace(
-                    self._messages, self._session_key
-                )
+                await self._compression.summarize_for_trace(self._messages)
             )
+            # 持久化：L2 折叠是一个"压缩节点"，checkpoint append 一条 compact 事件。
+            # compressed_messages 是折叠后的新基底——重启时从这里开始 replay 后续 msg 事件。
+            if l2_summary is not None and l2_folded > 0:
+                await self._checkpoint.append(
+                    self._session_key,
+                    {
+                        "kind": "compact",
+                        "step": self._step_idx,
+                        "summary": l2_summary,
+                        "folded_count": l2_folded,
+                        "compressed_messages": list(self._messages),
+                    },
+                )
             # 可观测性：L2 真的折叠时才记一条 compress span（summary 非空 + folded > 0）。
             if (
                 l2_summary is not None
@@ -294,10 +323,14 @@ class LoopEngine:
                     budget_ids=None,
                 )
 
-            # read_index 必须在 L2 之后，才能拿到刚写入 Memory 的 summary
+            # 注入 system prompt 的 `## Memory` section 内容。
             memory_index = await self._memory.read_index(self._session_key)
             messages = assemble_messages(
-                self._system, memory_index, self._skill_summary, self._messages
+                self._system,
+                memory_index,
+                self._skill_summary,
+                self._messages,
+                self._path_vars,
             )
             tool_schemas = self._tools.schemas()
 
@@ -387,7 +420,12 @@ class LoopEngine:
 
             # 3) final message 分支（agent 没调 tool 或 finish_reason=stop）
             if not tool_calls or finish_reason == "stop":
-                self._messages.append({"role": "assistant", "content": full_text})
+                assistant_msg = {"role": "assistant", "content": full_text}
+                self._messages.append(assistant_msg)
+                await self._checkpoint.append(
+                    self._session_key,
+                    {"kind": "msg", **assistant_msg},
+                )
                 final_text = full_text
                 self._session_metric.add(step_metric)
 
@@ -395,26 +433,28 @@ class LoopEngine:
                 pending = _drain(input_queue)
                 if not pending:
                     # 4a) 没新事件 → wait_io，react 结束
-                    # 持久化 final message：纯对话 turn 也得写盘，否则重启丢历史
-                    await self._checkpoint.save(
-                        CheckpointRecord(
-                            session_key=self._session_key,
-                            step_idx=self._step_idx,
-                            messages=tuple(self._messages),
-                            tool_results=(),
-                            compressed_snapshot=None,
-                        )
-                    )
                     await output_queue.put(StatusChange(state="wait_io"))
                     return final_text
                 # 4b) 有新事件 → aggregate，继续 react
                 for ev in pending:
-                    self._messages.append({"role": "user", "content": user_input_event_xml(ev)})
+                    msg = {"role": "user", "content": user_input_event_xml(ev)}
+                    self._messages.append(msg)
+                    await self._checkpoint.append(
+                        self._session_key,
+                        {"kind": "msg", **msg},
+                    )
                 continue
 
             # 5) tool dispatch
-            self._messages.append(
-                {"role": "assistant", "content": full_text or None, "tool_calls": tool_calls}
+            assistant_msg = {
+                "role": "assistant",
+                "content": full_text or None,
+                "tool_calls": tool_calls,
+            }
+            self._messages.append(assistant_msg)
+            await self._checkpoint.append(
+                self._session_key,
+                {"kind": "msg", **assistant_msg},
             )
             await output_queue.put(StatusChange(state="tooling"))
 
@@ -447,8 +487,15 @@ class LoopEngine:
                             latency_ms=0,
                             status="ok",
                         )
-                    self._messages.append(
-                        {"role": "tool", "tool_call_id": call_id, "content": tool_result_event_xml(call_id, result, tool=name)}
+                    tool_msg = {
+                        "role": "tool",
+                        "tool_call_id": call_id,
+                        "content": tool_result_event_xml(call_id, result, tool=name),
+                    }
+                    self._messages.append(tool_msg)
+                    await self._checkpoint.append(
+                        self._session_key,
+                        {"kind": "msg", **tool_msg},
                     )
                     has_wait_io = True
                     continue
@@ -511,28 +558,21 @@ class LoopEngine:
                             budget_ids=[result.budget_id] if result.budget_id else None,
                         )
 
-                self._messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": call_id,
-                        "content": tool_result_event_xml(call_id, result, tool=name),
-                    }
+                tool_msg = {
+                    "role": "tool",
+                    "tool_call_id": call_id,
+                    "content": tool_result_event_xml(call_id, result, tool=name),
+                }
+                self._messages.append(tool_msg)
+                await self._checkpoint.append(
+                    self._session_key,
+                    {"kind": "msg", **tool_msg},
                 )
 
             step_metric.tool_calls_count = len(tool_calls)
             self._session_metric.add(step_metric)
 
             # 注意：MetricChunk 已经在 step 完成时统一发过一次（line ~360），不再重复。
-
-            await self._checkpoint.save(
-                CheckpointRecord(
-                    session_key=self._session_key,
-                    step_idx=self._step_idx,
-                    messages=tuple(self._messages),
-                    tool_results=(),
-                    compressed_snapshot=None,
-                )
-            )
 
             if has_wait_io:
                 # wait_io: react 结束，进入 wait_io 状态

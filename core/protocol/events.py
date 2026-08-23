@@ -139,11 +139,8 @@ class LlmChunk:
 
 
 # ---------- Checkpoint ----------
-
-@dataclass(frozen=True)
-class CheckpointRecord:
-    session_key: str
-    step_idx: int
-    messages: tuple[dict[str, Any], ...]
-    tool_results: tuple[ToolResult, ...]
-    compressed_snapshot: dict[str, Any] | None = None
+#
+# 不再有 CheckpointRecord dataclass——checkpoint 改 append-only log 模式
+# （见 core/protocol/storage.py 的 CheckpointStore 文档）。events 直接是 dict：
+#   {"kind": "msg"|"compact", ...}
+# 两类节点。

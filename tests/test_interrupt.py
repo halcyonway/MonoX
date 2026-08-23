@@ -88,7 +88,6 @@ def build(tmp: Path):
     compression = CompressionService(
         budget_tool=tools.get("read_tool_result_budget"),
         llm=None,  # type: ignore[arg-type]
-        memory=mem_store,
     )
     return tools, mem_store, ck, skill_sum, compression
 

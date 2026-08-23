@@ -32,6 +32,7 @@ spec/
 │   ├── event-wrapper.md      # 外部信号统一包装协议
 │   ├── multi-channel.md      # 多通道并行接入（旧 in-process 方案，已迁移到 ARCHITECTURE §12）
 │   ├── multi-session.md      # Runtime 多 session + Channel 独立进程化（已实现）
+│   ├── memory.md             # 跨会话长期记忆（已实现）
 │   ├── feishu-channel.md     # 飞书接入
 │   ├── context-compression.md # L0/L1/L2 上下文压缩
 │   ├── shutdown.md           # engine 响应 channel 关闭

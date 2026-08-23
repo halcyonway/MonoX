@@ -190,15 +190,15 @@ async def _write_404(
 
 
 # ----------------------------------------------------------------------
-# 默认 TraceProvider：在给定的 memory_root 下，per-session 一个 JsonlTraceStore。
+# 默认 TraceProvider：在给定的 traces_root 下，per-session 一个 JsonlTraceStore。
 # 用于 run.py 把 DebugServer 接起来；测试可注入别的 provider。
 # ----------------------------------------------------------------------
 
 class FsTraceProvider:
     """Per-session JsonlTraceStore 的懒加载 + 缓存。"""
 
-    def __init__(self, memory_root) -> None:
-        self._root = Path(memory_root)
+    def __init__(self, traces_root) -> None:
+        self._root = Path(traces_root)
         self._cache: dict[str, TraceStore] = {}
         self._lock = asyncio.Lock()
 

@@ -33,7 +33,7 @@ graph TB
 
     subgraph Extensions["extensions/ (swappable adapters)"]
         Channels["channels/<br/>in-process:<br/>terminal / feishu / textual_chat"]
-        Skills["skills/<br/>memory-write / ..."]
+        Skills["skills/<br/>(no built-in skills)"]
     end
 
     Run["run.py<br/>assembly"]
@@ -133,5 +133,5 @@ uv run pytest tests/ -q
 |---|---|
 | 1. 多 channel（独立进程 + 多 session 共享） | [`spec/requirements/multi-session.md`](spec/requirements/multi-session.md) |
 | 2. 上下文压缩（L1/L2） | [`spec/requirements/context-compression.md`](spec/requirements/context-compression.md) |
-| 3. 长期记忆（Memory.md + notes/） | [`spec/ARCHITECTURE.md` §8](spec/ARCHITECTURE.md#8-关键存储设计) |
+| 3. 长期记忆（Memory.md + notes/） | [`spec/requirements/memory.md`](spec/requirements/memory.md) |
 | 4. 事件建模（frozen dataclass + XML 包装） | [`spec/requirements/event-wrapper.md`](spec/requirements/event-wrapper.md) |

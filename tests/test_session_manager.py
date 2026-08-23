@@ -38,14 +38,15 @@ def _make_session_manager(
     compression_llm = MagicMock()
     tools = MagicMock()
     compression = MagicMock()
-    memory = FsMemoryStore(tmp)
+    memory = FsMemoryStore(tmp / "mem")
     return SessionManager(
         llm=llm,
         compression_llm=compression_llm,
         tools=tools,
         compression=compression,
         memory=memory,
-        memory_root=tmp,
+        state_root=tmp / "state",
+        traces_root=tmp / "traces",
         system_prompt="test",
         skill_summary="",
         outbound_register=outbound_register,

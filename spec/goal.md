@@ -50,7 +50,7 @@ MonoX 是一个**自托管最小 agent runtime core**。目标不是产品化 Sa
 什么时候算「v1.0」：
 - ✅ core 不再需要功能改动
 - ✅ 3 个 channel 都 work（terminal / textual / feishu）
-- ✅ 2 个 skill（coding + memory-write）
+- ✅ 1 个 skill（coding）
 - ✅ e2e + smoke test 覆盖核心路径
 - ✅ 一个真实项目（用 MonoX 写 MonoX 的某一版本）成功跑通
 

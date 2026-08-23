@@ -15,17 +15,54 @@ from core.protocol import ToolResult
 L1_TRUNCATE_LEN = 4000
 
 
+def memory_section(path_vars: dict[str, str]) -> str:
+    """System prompt 的 `## Memory` section。
+
+    路径用 `{MONOX_*}` 占位符，调用方负责 `.format(**path_vars)` 一次替换。
+    替换值来自 `cfg.sandbox`——同一份 config 控制所有路径，prompt 不硬编码。
+    """
+    return """\
+
+## Memory
+
+`{MONOX_MEMORY_DIR}/Memory.md` (injected above, under this section) is your long-term
+**cross-session** memory. Its body is a sparse index: each line `- topic: notes/x.md`
+points to a detail file in `{MONOX_MEMORY_DIR}/notes/`.
+
+**Read**: `{MONOX_MEMORY_DIR}/Memory.md` is already injected. To fetch a specific topic's
+detail file, use Bash (`cat {MONOX_MEMORY_DIR}/notes/<topic>.md`).
+
+**Write** — low-frequency, explicit only:
+- The user says 记住 / remember / save this / 别忘了, **or**
+- You learn a durable preference, project convention, or gotcha worth keeping across sessions.
+
+To remember: write the detail file under `{MONOX_MEMORY_DIR}/notes/`, then append one line
+to the index file at `{MONOX_MEMORY_DIR}/Memory.md`.
+
+Do **not** auto-summarize the conversation, do not write ephemeral task state, do not write raw data.
+""".format(**path_vars)
+
+
 def assemble_messages(
     system: str,
     memory_index: str,
     skill_summary: str,
     messages: list[dict[str, Any]],
+    path_vars: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
-    parts: list[str] = [system]
+    """拼装最终发给 LLM 的 messages。
+
+    `path_vars` 来源于 `cfg.sandbox`，作为模板 `{MONOX_*}` 的替换表——同一份 config
+    既注入 prompt（通过占位符替换）又让 bash 子进程可见（通过路径直接落在 cwd 下的子目录）。
+    state/traces **不**出现在这里——它们是 Runtime 内部 state，不让 LLM 看见。
+    """
+    if path_vars is None:
+        path_vars = {}
+    parts: list[str] = [system, memory_section(path_vars)]
     if memory_index:
-        parts.append(f"\n\n## Memory\n{memory_index}")
+        parts.append(f"\n# Memory index\n{memory_index}")
     if skill_summary:
-        parts.append(f"\n\n## Available Skills\n{skill_summary}")
+        parts.append(f"\n## Available Skills\n{skill_summary}")
     return [{"role": "system", "content": "".join(parts)}] + list(messages)
 
 
