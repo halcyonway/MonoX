@@ -253,3 +253,75 @@ def test_format_l1_l2_section_omitted_when_zero(tmp_path: Path) -> None:
     svc = SkillService(tmp_path)
     section = svc.format_l1_prompt_section()
     assert "Tier 2" not in section
+
+
+# ---------- write / delete ----------
+
+class TestWrite:
+    def test_write_creates_file_and_parent(self, tmp_path: Path) -> None:
+        svc = SkillService(tmp_path)
+        svc.write("new-skill", "# New\n\nbody\n")
+        assert (tmp_path / "new-skill" / "SKILL.md").read_text() == "# New\n\nbody\n"
+
+    def test_write_overwrites_existing(self, tmp_path: Path) -> None:
+        svc = SkillService(tmp_path)
+        svc.write("a", "v1")
+        svc.write("a", "v2")
+        assert (tmp_path / "a" / "SKILL.md").read_text() == "v2"
+
+    def test_write_with_frontmatter(self, tmp_path: Path) -> None:
+        svc = SkillService(tmp_path)
+        body = "---\nname: x\ndescription: desc\ntier: 1\n---\n\n# X\n"
+        svc.write("x", body)
+        # 重新 abstract 能识别 frontmatter
+        meta = svc.abstract()
+        assert len(meta) == 1
+        assert meta[0].name == "x"
+        assert meta[0].description == "desc"
+        assert meta[0].tier == 1
+
+    def test_write_rejects_path_traversal(self, tmp_path: Path) -> None:
+        svc = SkillService(tmp_path)
+        with pytest.raises(ValueError):
+            svc.write("../escape", "x")
+        with pytest.raises(ValueError):
+            svc.write("a/b", "x")
+        with pytest.raises(ValueError):
+            svc.write("", "x")
+        with pytest.raises(ValueError):
+            svc.write(".hidden", "x")
+
+    def test_write_accepts_normal_names(self, tmp_path: Path) -> None:
+        svc = SkillService(tmp_path)
+        for name in ("simple", "with-dash", "with_underscore", "Mixed.Case", "数字123"):
+            svc.write(name, "ok")
+            assert (tmp_path / name / "SKILL.md").exists()
+
+
+class TestDelete:
+    def test_delete_removes_dir(self, tmp_path: Path) -> None:
+        svc = SkillService(tmp_path)
+        svc.write("a", "x")
+        assert (tmp_path / "a").exists()
+        svc.delete("a")
+        assert not (tmp_path / "a").exists()
+
+    def test_delete_missing_raises(self, tmp_path: Path) -> None:
+        svc = SkillService(tmp_path)
+        with pytest.raises(FileNotFoundError):
+            svc.delete("nonexistent")
+
+    def test_delete_rejects_path_traversal(self, tmp_path: Path) -> None:
+        svc = SkillService(tmp_path)
+        with pytest.raises(ValueError):
+            svc.delete("../escape")
+        with pytest.raises(ValueError):
+            svc.delete("a/b")
+
+    def test_delete_then_abstract_excludes(self, tmp_path: Path) -> None:
+        svc = SkillService(tmp_path)
+        svc.write("a", "x")
+        svc.write("b", "y")
+        assert {s.name for s in svc.abstract()} == {"a", "b"}
+        svc.delete("a")
+        assert {s.name for s in svc.abstract()} == {"b"}

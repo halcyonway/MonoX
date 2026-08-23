@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import logging
 import re
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -30,6 +31,21 @@ _log = logging.getLogger("monox.skill_service")
 
 # 顶层 `---` 单独一行作为 frontmatter 分隔；body 内 `---` 不会匹配（必须从文件开头起）。
 _FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*\n", re.DOTALL)
+
+
+def _is_valid_skill_name(name: str) -> bool:
+    """校验 skill 目录名：非空、不含路径分隔符、不含 \0、不以 `.` 开头。
+
+    防 Zip Slip / path traversal 攻击（虽然我们有 `self._root / name` 的安全拼接，
+    但早期 reject 错误输入更稳妥）。
+    """
+    if not name or not isinstance(name, str):
+        return False
+    if name.startswith("."):
+        return False
+    if "/" in name or "\\" in name or "\0" in name:
+        return False
+    return True
 
 
 @dataclass(frozen=True)
@@ -146,6 +162,36 @@ class SkillService:
             FileNotFoundError: skill 不存在。
         """
         return (self._root / name / "SKILL.md").read_text(encoding="utf-8")
+
+    # ---- 写操作（MonoDesk UI / agent self-create 用）----
+
+    def write(self, name: str, body: str) -> None:
+        """写 `<root>/<name>/SKILL.md`（覆盖）。
+
+        自动 mkdir parent。body 是完整 markdown 内容（含 frontmatter）。
+
+        Raises:
+            ValueError: name 非法（含路径分隔符或空）。
+        """
+        if not _is_valid_skill_name(name):
+            raise ValueError(f"invalid skill name: {name!r}")
+        skill_md = self._root / name / "SKILL.md"
+        skill_md.parent.mkdir(parents=True, exist_ok=True)
+        skill_md.write_text(body, encoding="utf-8")
+
+    def delete(self, name: str) -> None:
+        """删 `<root>/<name>/` 整个目录。
+
+        Raises:
+            FileNotFoundError: skill 不存在。
+            ValueError: name 非法（含路径分隔符或空）。
+        """
+        if not _is_valid_skill_name(name):
+            raise ValueError(f"invalid skill name: {name!r}")
+        skill_dir = self._root / name
+        if not skill_dir.exists():
+            raise FileNotFoundError(name)
+        shutil.rmtree(skill_dir)
 
     # ---- Prompt 渲染 ----
 

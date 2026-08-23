@@ -427,6 +427,7 @@ async def run(cfg_path: str, args: argparse.Namespace) -> None:
     debug = DebugServer(
         DebugServerConfig(host=cfg.server.host, port=debug_port),
         trace_provider=FsTraceProvider(traces_root),
+        skill_service=skill_service,
     )
 
     print(

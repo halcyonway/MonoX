@@ -1,14 +1,24 @@
-"""DebugServer — MonoX 可观测性的 HTTP 入口（:8768，独立端口）。
+"""DebugServer — MonoX 可观测性 + skill 管理的 HTTP 入口（:8768，独立端口）。
 
 跟 HealthServer 一样用 stdlib asyncio.start_server，避免 aiohttp 依赖。
 
 路由：
-- GET /health
+- GET  /health
     → {"sessions": [...]}            （同 :8767/health，方便 monoDesk 复用）
-- GET /debug/runs/recent?session_key=X&limit=20
+- GET  /debug/runs/recent?session_key=X&limit=20
     → {"runs": [RunSummary, ...]}    （按 start_ts 倒序）
-- GET /debug/runs/<run_id>?session_key=X
+- GET  /debug/runs/<run_id>?session_key=X
     → Run JSON（完整 turns + spans）
+- GET  /debug/skills/list
+    → {"skills": [SkillAbstract, ...]}  （name / description / tier / path）
+- GET  /debug/skills/<name>
+    → {"name", "description", "tier", "path", "body"}   （完整 SKILL.md）
+- PUT  /debug/skills/<name>          （body = 完整 markdown 文本）
+    → {"ok": true, "name": "..."}
+- DELETE /debug/skills/<name>
+    → {"ok": true, "name": "..."}
+- POST /debug/skills/upload          （body = zip 字节）
+    → {"added": ["foo", "bar"]}
 - 其他 → 404
 
 MonoDesk dev 走 vite proxy 转 `/debug/*` → `http://127.0.0.1:8768`；
@@ -20,6 +30,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import zipfile
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,6 +38,8 @@ from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 from core.observability import JsonlTraceStore, TraceStore
+from core.skill_service import SkillService
+from core.skill_upload import SkillUploadError, extract_skill_zip
 
 _log = logging.getLogger("monox.debug_server")
 
@@ -46,9 +59,11 @@ class DebugServer:
         cfg: DebugServerConfig,
         *,
         trace_provider: TraceProvider,
+        skill_service: SkillService | None = None,
     ) -> None:
         self._cfg = cfg
         self._trace_provider = trace_provider
+        self._skill_service = skill_service
         self._stop = asyncio.Event()
         self._server: asyncio.base_events.Server | None = None
 
@@ -75,19 +90,55 @@ class DebugServer:
         except (asyncio.IncompleteReadError, ConnectionResetError, Exception):
             writer.close()
             return
+
+        # 解析 header 块（拆 \r\n），拿 request line + Content-Length + Content-Type
         try:
-            request_line = raw.split(b"\r\n", 1)[0].decode("ascii", errors="replace")
+            header_block = raw.split(b"\r\n\r\n", 1)[0].decode("ascii", errors="replace")
         except Exception:
             await _write_404(writer)
             return
+        header_lines = header_block.split("\r\n")
+        if not header_lines:
+            await _write_404(writer)
+            return
+        request_line = header_lines[0]
         parts = request_line.split()
         if len(parts) < 2:
             await _write_404(writer)
             return
         method, path_q = parts[0], parts[1]
-        if method != "GET":
+        if method not in ("GET", "PUT", "POST", "DELETE"):
             await _write_404(writer)
             return
+
+        # parse headers
+        content_length = 0
+        content_type = ""
+        for line in header_lines[1:]:
+            if ":" not in line:
+                continue
+            k, _, v = line.partition(":")
+            kl = k.strip().lower()
+            vl = v.strip()
+            if kl == "content-length":
+                try:
+                    content_length = int(vl)
+                except ValueError:
+                    content_length = 0
+            elif kl == "content-type":
+                content_type = vl
+
+        # 读 body（如果声明了长度）
+        body_bytes = b""
+        if content_length > 0:
+            try:
+                body_bytes = await reader.readexactly(content_length)
+            except (asyncio.IncompleteReadError, Exception):
+                cors_pre = path_q.startswith("/debug/")
+                await _send_json(
+                    writer, 400, {"error": "incomplete body"}, extra_cors=cors_pre,
+                )
+                return
 
         split = urlsplit(path_q)
         path = split.path
@@ -143,7 +194,154 @@ class DebugServer:
                 return
             await _send_json(writer, 200, run.to_dict(), extra_cors=cors)
             return
+        # ---- skill 管理路由（需要注入 SkillService）----
+        if self._skill_service is not None and path.startswith("/debug/skills"):
+            await self._handle_skills(method, path, body_bytes, content_type, writer, cors)
+            return
         await _write_404(writer, extra_cors=cors)
+
+    async def _handle_skills(
+        self,
+        method: str,
+        path: str,
+        body_bytes: bytes,
+        content_type: str,
+        writer: asyncio.StreamWriter,
+        cors: bool,
+    ) -> None:
+        """处理 /debug/skills/* 系列路由。
+
+        - GET  /debug/skills/list
+        - GET  /debug/skills/<name>
+        - PUT  /debug/skills/<name>           body = markdown 文本
+        - DELETE /debug/skills/<name>
+        - POST /debug/skills/upload           body = zip 字节
+        """
+        svc = self._skill_service
+        assert svc is not None  # caller checks
+
+        # /debug/skills/list
+        if path == "/debug/skills/list":
+            if method != "GET":
+                await _send_json(
+                    writer, 405, {"error": "method not allowed"}, extra_cors=cors,
+                )
+                return
+            payload = {
+                "skills": [
+                    {
+                        "name": s.name,
+                        "description": s.description,
+                        "tier": s.tier,
+                        "path": str(s.path),
+                    }
+                    for s in svc.abstract()
+                ]
+            }
+            await _send_json(writer, 200, payload, extra_cors=cors)
+            return
+
+        # /debug/skills/upload
+        if path == "/debug/skills/upload":
+            if method != "POST":
+                await _send_json(
+                    writer, 405, {"error": "method not allowed"}, extra_cors=cors,
+                )
+                return
+            try:
+                added = extract_skill_zip(body_bytes, svc._root)
+            except SkillUploadError as exc:
+                await _send_json(
+                    writer, 400, {"error": str(exc)}, extra_cors=cors,
+                )
+                return
+            except zipfile.BadZipFile as exc:
+                await _send_json(
+                    writer, 400, {"error": f"invalid zip: {exc}"}, extra_cors=cors,
+                )
+                return
+            except OSError as exc:
+                await _send_json(
+                    writer, 500, {"error": f"write failed: {exc}"}, extra_cors=cors,
+                )
+                return
+            _log.info("uploaded skill pack: added=%s", added)
+            await _send_json(writer, 200, {"added": added}, extra_cors=cors)
+            return
+
+        # /debug/skills/<name>
+        name = path[len("/debug/skills/"):]
+        if not name or "/" in name:
+            await _send_json(
+                writer, 400, {"error": "invalid skill name"}, extra_cors=cors,
+            )
+            return
+
+        if method == "GET":
+            try:
+                body = svc.load(name)
+                meta = next((s for s in svc.abstract() if s.name == name), None)
+            except FileNotFoundError:
+                await _send_json(
+                    writer, 404, {"error": "skill not found", "name": name},
+                    extra_cors=cors,
+                )
+                return
+            payload = {
+                "name": name,
+                "description": meta.description if meta else "",
+                "tier": meta.tier if meta else 1,
+                "path": str(svc._root / name),
+                "body": body,
+            }
+            await _send_json(writer, 200, payload, extra_cors=cors)
+            return
+        if method == "PUT":
+            try:
+                text = body_bytes.decode("utf-8")
+            except UnicodeDecodeError:
+                await _send_json(
+                    writer, 400, {"error": "body must be utf-8 text"}, extra_cors=cors,
+                )
+                return
+            try:
+                svc.write(name, text)
+            except ValueError as exc:
+                await _send_json(
+                    writer, 400, {"error": str(exc)}, extra_cors=cors,
+                )
+                return
+            except OSError as exc:
+                await _send_json(
+                    writer, 500, {"error": f"write failed: {exc}"}, extra_cors=cors,
+                )
+                return
+            await _send_json(writer, 200, {"ok": True, "name": name}, extra_cors=cors)
+            return
+        if method == "DELETE":
+            try:
+                svc.delete(name)
+            except FileNotFoundError:
+                await _send_json(
+                    writer, 404, {"error": "skill not found", "name": name},
+                    extra_cors=cors,
+                )
+                return
+            except ValueError as exc:
+                await _send_json(
+                    writer, 400, {"error": str(exc)}, extra_cors=cors,
+                )
+                return
+            except OSError as exc:
+                await _send_json(
+                    writer, 500, {"error": f"delete failed: {exc}"}, extra_cors=cors,
+                )
+                return
+            await _send_json(writer, 200, {"ok": True, "name": name}, extra_cors=cors)
+            return
+        await _send_json(
+            writer, 405, {"error": "method not allowed"}, extra_cors=cors,
+        )
 
 
 def _first(qs: dict[str, list[str]], key: str) -> str:
