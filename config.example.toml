@@ -82,3 +82,5 @@ state_root     = "./.monox/state"
 traces_root    = "./.monox/traces"
 skills_root    = "./.monox/skills"
 tmp_root       = "./.monox/tmp"
+# L1 skill 自动注入 system prompt 的上限；超限时按字典序截断并 warn
+skills_max_l1  = 50

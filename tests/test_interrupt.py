@@ -18,7 +18,6 @@ from tests._inprocess_bridge import InProcessBridge as Gateway
 from core.loop.checkpoint import JsonlCheckpointStore
 from core.loop.compression import CompressionService
 from core.loop.engine import LoopEngine
-from core.loop.skill_summary import SkillSummaryLoader
 from core.loop.tool_registry import ToolRegistry
 from core.loop.tools import BashTool, ReadToolResultBudgetTool, SkillLoadTool, WaitIoTool
 from core.memory import FsMemoryStore
@@ -32,6 +31,7 @@ from core.protocol import (
     ToolEnd,
 )
 from core.sandbox import BashRunner
+from core.skill_service import SkillService
 
 
 class SlowLLM(LLMProxy):
@@ -76,20 +76,20 @@ def build(tmp: Path):
     ws = tmp / "ws"; ws.mkdir(parents=True, exist_ok=True)
     mem = tmp / "mem"; mem.mkdir(exist_ok=True)
     skills = tmp / "skills"; skills.mkdir(exist_ok=True)
+    skill_service = SkillService(skills)
     tools = ToolRegistry([
         BashTool(BashRunner(), ws),
-        SkillLoadTool(skills),
+        SkillLoadTool(skill_service),
         WaitIoTool(),
         ReadToolResultBudgetTool(),
     ])
     mem_store = FsMemoryStore(mem)
     ck = JsonlCheckpointStore(mem / "default" / "checkpoint.jsonl")
-    skill_sum = SkillSummaryLoader(skills).summary()
     compression = CompressionService(
         budget_tool=tools.get("read_tool_result_budget"),
         llm=None,  # type: ignore[arg-type]
     )
-    return tools, mem_store, ck, skill_sum, compression
+    return tools, mem_store, ck, skill_service, compression
 
 
 async def _wait_for(predicate, timeout: float = 3.0, interval: float = 0.05) -> bool:
@@ -111,7 +111,7 @@ async def test_interrupt_cancels_step() -> None:
     loop = LoopEngine(
         session_key="default", system_prompt="t",
         llm=SlowLLM(), tools=tools, compression=comp,
-        memory=mem, checkpoint=ck, skill_summary=ss,
+        memory=mem, checkpoint=ck, skill_service=ss,
     )
     ch = StubChannel()
     iq: asyncio.Queue[InboundEvent] = asyncio.Queue()
@@ -181,7 +181,7 @@ async def test_interrupt_before_react_does_nothing_harmful() -> None:
     loop = LoopEngine(
         session_key="default", system_prompt="t",
         llm=ShortLLM(), tools=tools, compression=comp,
-        memory=mem, checkpoint=ck, skill_summary=ss,
+        memory=mem, checkpoint=ck, skill_service=ss,
     )
     ch = StubChannel()
     iq: asyncio.Queue[InboundEvent] = asyncio.Queue()

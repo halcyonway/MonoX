@@ -90,8 +90,7 @@ def _make_engine(
         compression=compression,
         memory=mem,
         checkpoint=ck,
-        skill_summary="",
-        max_steps=3,
+                max_steps=3,
         traces=traces,
     )
     return engine, asyncio.Queue(), asyncio.Queue()
@@ -247,7 +246,7 @@ async def test_metric_carry_trace_id_with_tool_call(tmp_path: Path):
         session_key="default", system_prompt="sys", llm=mock,
         tools=ToolRegistry([WaitIoTool()]),
         compression=compression, memory=mem, checkpoint=ck,
-        skill_summary="", max_steps=3, traces=collector,
+        max_steps=3, traces=collector,
     )
     in_q: asyncio.Queue = asyncio.Queue()
     out_q: asyncio.Queue = asyncio.Queue()

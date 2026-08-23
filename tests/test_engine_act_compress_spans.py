@@ -111,8 +111,7 @@ def _build_engine(
         compression=compression,
         memory=mem,
         checkpoint=ck,
-        skill_summary="",
-        max_steps=5,
+                max_steps=5,
         traces=collector,
     )
     return engine, asyncio.Queue(), asyncio.Queue()
@@ -264,8 +263,7 @@ async def test_engine_records_act_span_for_wait_io(tmp_path: Path):
         compression=comp,
         memory=mem,
         checkpoint=ck,
-        skill_summary="",
-        max_steps=5,
+                max_steps=5,
         traces=collector,
     )
     in_q: asyncio.Queue = asyncio.Queue()

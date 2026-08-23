@@ -10,6 +10,7 @@ from typing import Any
 
 from core.loop.tools.read_tr_budget import ReadToolResultBudgetTool
 from core.protocol import ToolResult
+from core.skill_service import SkillService
 
 
 L1_TRUNCATE_LEN = 4000
@@ -46,7 +47,7 @@ Do **not** auto-summarize the conversation, do not write ephemeral task state, d
 def assemble_messages(
     system: str,
     memory_index: str,
-    skill_summary: str,
+    skill_service: SkillService | None,
     messages: list[dict[str, Any]],
     path_vars: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
@@ -55,14 +56,22 @@ def assemble_messages(
     `path_vars` 来源于 `cfg.sandbox`，作为模板 `{MONOX_*}` 的替换表——同一份 config
     既注入 prompt（通过占位符替换）又让 bash 子进程可见（通过路径直接落在 cwd 下的子目录）。
     state/traces **不**出现在这里——它们是 Runtime 内部 state，不让 LLM 看见。
+
+    Skills：把 `SkillService` 实例传进来，每 turn `service.format_l1_prompt_section()`
+    重新扫文件系统（agent 在 session 内创建 skill 后下一个 turn 立即生效）。
+    `skill_service=None` 时不注入 Skills section（向后兼容测试）。
     """
     if path_vars is None:
         path_vars = {}
     parts: list[str] = [system, memory_section(path_vars)]
     if memory_index:
         parts.append(f"\n# Memory index\n{memory_index}")
-    if skill_summary:
-        parts.append(f"\n## Available Skills\n{skill_summary}")
+    if skill_service is not None:
+        skills_section = skill_service.format_l1_prompt_section_resolved(
+            path_vars.get("MONOX_SKILLS_DIR", "")
+        )
+        if skills_section:
+            parts.append(skills_section)
     return [{"role": "system", "content": "".join(parts)}] + list(messages)
 
 

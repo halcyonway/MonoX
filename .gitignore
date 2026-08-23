@@ -20,7 +20,7 @@ memory/
 tmp/
 
 # skills source code (not runtime data)
-!extensions/skills/
+# !extensions/skills/  ← REMOVED: skills live at <sandbox.skills_root>/ only
 !core/memory/
 
 # local config — keep config.example.toml as template, ignore user's config.toml

@@ -67,6 +67,7 @@ class SandboxConfig:
     traces_root: str = "/var/agent/traces"
     skills_root: str = "/var/agent/skills"
     tmp_root: str = "/var/agent/tmp"
+    skills_max_l1: int = 50  # L1 skill 注入 system prompt 的上限
 
 
 @dataclass(frozen=True)
