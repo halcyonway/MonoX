@@ -347,6 +347,17 @@ class LoopEngine:
             step_metric.latency_ms = int((time.monotonic() - t0) * 1000)
             step_metric.tokens = usage
 
+            # 每个 step 完成后立即发 MetricChunk（不依赖后面是 final 还是 tool 路径）。
+            # 之前只 tool dispatch 之后才发，导致纯对话 turn（agent finish_reason=stop，
+            # 不调 tool）→ 没 metric chunk → MonoDesk 看不到 tokens / cache。
+            await output_queue.put(
+                MetricChunk(
+                    metrics=step_metric.snapshot(),
+                    trace_id=self._run_id,
+                    turn_id=self._current_turn_id,
+                )
+            )
+
             # 调试日志：trace / MetricChunk 携带的 usage 状态。
             # usage=None 通常意味着上游没传 stream_options.include_usage，
             # 或者代理被换成了不支持该字段的实现 —— 从这条日志直接看出来。
@@ -511,13 +522,7 @@ class LoopEngine:
             step_metric.tool_calls_count = len(tool_calls)
             self._session_metric.add(step_metric)
 
-            await output_queue.put(
-                MetricChunk(
-                    metrics=step_metric.snapshot(),
-                    trace_id=self._run_id,
-                    turn_id=self._current_turn_id,
-                )
-            )
+            # 注意：MetricChunk 已经在 step 完成时统一发过一次（line ~360），不再重复。
 
             await self._checkpoint.save(
                 CheckpointRecord(
