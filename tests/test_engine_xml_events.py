@@ -103,7 +103,6 @@ def _build_engine(
     compression = CompressionService(
         budget_tool=ReadToolResultBudgetTool(),
         llm=llm,
-        memory=mem,
     )
     engine = LoopEngine(
         session_key="default",
@@ -249,7 +248,7 @@ async def test_l2_compression_preserves_xml_event_messages(tmp_path: Path) -> No
         messages.append({"role": "assistant", "content": f"ok{i}"})
 
     # 用真实 CompressionService 的 should_compress 判断
-    cs = CS(budget_tool=ReadToolResultBudgetTool(), llm=_CapturingLLM(), memory=None)
+    cs = CS(budget_tool=ReadToolResultBudgetTool(), llm=_CapturingLLM())
     assert cs.should_compress(messages)
 
     # 检查所有 user message 都是 XML event

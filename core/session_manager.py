@@ -80,9 +80,11 @@ class SessionManager:
         tools: ToolRegistry,
         compression: CompressionService,
         memory: FsMemoryStore,
-        memory_root: Path,
+        state_root: Path,
+        traces_root: Path,
         system_prompt: str,
         skill_summary: str,
+        path_vars: dict[str, str] | None = None,
         max_steps: int = 30,
         outbound_register: OutboundRegister | None = None,
         outbound_unregister: OutboundUnregister | None = None,
@@ -96,7 +98,10 @@ class SessionManager:
         self._tools = tools
         self._compression = compression
         self._memory = memory
-        self._memory_root = memory_root
+        # prompt 路径占位符替换表：来自 cfg.sandbox，可见组路径才塞进来
+        self._path_vars = path_vars or {}
+        self._state_root = state_root
+        self._traces_root = traces_root
         self._system_prompt = system_prompt
         self._skill_summary = skill_summary
         self._max_steps = max_steps
@@ -165,17 +170,18 @@ class SessionManager:
     # ------------------------------------------------------------------
 
     async def _create(self, session_key: str) -> SessionLoop:
-        # 每 session_key 一份独立 JsonlCheckpointStore（多 session 不能共享 jsonl 文件）
-        ck_path = self._memory_root / session_key / "checkpoint.jsonl"
+        # checkpoint 落在 state/<sk>/ 下——Runtime 内部 state，
+        # 跟 LLM shell cwd（workspace/）严格隔离，LLM 不应见到这文件
+        ck_path = self._state_root / session_key / "checkpoint.jsonl"
         ck_path.parent.mkdir(parents=True, exist_ok=True)
         checkpoint = JsonlCheckpointStore(ck_path)
 
-        # 可观测性：每个 session 一份独立的 JsonlTraceStore + TraceCollector
+        # trace 落在独立 traces/<sk>/ 下——可观测性与用户 memory 完全分离
         trace_collector: TraceCollector | None = None
         if self._enable_traces:
-            trace_store = JsonlTraceStore(
-                self._memory_root / session_key / "traces.jsonl"
-            )
+            trace_path = self._traces_root / session_key / "traces.jsonl"
+            trace_path.parent.mkdir(parents=True, exist_ok=True)
+            trace_store = JsonlTraceStore(trace_path)
             trace_collector = TraceCollector(trace_store, session_key)
 
         loop_engine = LoopEngine(
@@ -187,6 +193,7 @@ class SessionManager:
             memory=self._memory,
             checkpoint=checkpoint,
             skill_summary=self._skill_summary,
+            path_vars=self._path_vars,
             max_steps=self._max_steps,
             traces=trace_collector,
         )

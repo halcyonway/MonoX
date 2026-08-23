@@ -78,5 +78,7 @@ allowed_chats = []
 [sandbox]
 workspace_root = "./.monox/workspace"
 memory_root    = "./.monox/memory"
+state_root     = "./.monox/state"
+traces_root    = "./.monox/traces"
 skills_root    = "./.monox/skills"
 tmp_root       = "./.monox/tmp"

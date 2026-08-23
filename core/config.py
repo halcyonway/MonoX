@@ -63,6 +63,8 @@ class MultiChannelConfig:
 class SandboxConfig:
     workspace_root: str = "/var/agent/workspace"
     memory_root: str = "/var/agent/memory"
+    state_root: str = "/var/agent/state"
+    traces_root: str = "/var/agent/traces"
     skills_root: str = "/var/agent/skills"
     tmp_root: str = "/var/agent/tmp"
 
@@ -155,16 +157,35 @@ class Config:
 
 
 def session_paths(cfg: Config) -> dict[str, Path]:
-    """所有 sandbox 路径。session 维度的自动按 session_key 隔离。"""
-    base = Path(cfg.sandbox.workspace_root)
+    """所有 sandbox 路径。
+
+    四个 root 互不嵌套：
+
+    - `workspace/<sk>/`：LLM 视角的 shell cwd（可改、可删）。
+    - `state/<sk>/`：Runtime 视角的 internal state（LLM 不应该看到，更不能 rm）。
+      - checkpoint.jsonl 在这里。
+    - `traces/<sk>/`：开发者视角的可观测 trace，独立 root。
+    - `memory/`：用户视角的长期记忆，**跨会话全局**。
+    """
+    ws_root = Path(cfg.sandbox.workspace_root)
+    state_root = Path(cfg.sandbox.state_root)
+    mem_root = Path(cfg.sandbox.memory_root)
+    traces_root = Path(cfg.sandbox.traces_root)
     return {
-        # session 隔离
-        "workspace": base / cfg.session_key,
-        "memory": Path(cfg.sandbox.memory_root) / cfg.session_key,
-        "checkpoint": Path(cfg.sandbox.memory_root) / cfg.session_key / "checkpoint.jsonl",
-        "memory_index": Path(cfg.sandbox.memory_root) / cfg.session_key / "Memory.md",
-        "memory_notes": Path(cfg.sandbox.memory_root) / cfg.session_key / "notes",
-        # 共享，不按 session 隔离
+        # session 隔离：LLM shell cwd
+        "workspace": ws_root / cfg.session_key,
+        # session 隔离：Runtime internal state（LLM 不应见）
+        "state": state_root,
+        "state_dir": state_root / cfg.session_key,
+        "checkpoint": state_root / cfg.session_key / "checkpoint.jsonl",
+        # session 隔离：可观测 trace
+        "traces": traces_root / cfg.session_key / "traces.jsonl",
+        "traces_root": traces_root,
+        # 跨会话全局：用户长期记忆
+        "memory": mem_root,
+        "memory_index": mem_root / "Memory.md",
+        "memory_notes": mem_root / "notes",
+        # 共享
         "skills_root": Path(cfg.sandbox.skills_root),
         "tmp_root": Path(cfg.sandbox.tmp_root),
     }

@@ -13,7 +13,6 @@ from .events import (
     ToolCall,
     ToolResult,
     LlmChunk,
-    CheckpointRecord,
     File,
 )
 from .llm import LLMProxy
@@ -36,7 +35,6 @@ __all__ = [
     "ToolCall",
     "ToolResult",
     "LlmChunk",
-    "CheckpointRecord",
     "File",
     "LLMProxy",
     "SandboxResult",

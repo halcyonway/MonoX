@@ -28,6 +28,8 @@ class TestRunValidation:
     async def test_missing_compression_raises(self, tmp_path):
         ws = tmp_path / "ws"
         mem = tmp_path / "mem"
+        state = tmp_path / "state"
+        traces = tmp_path / "traces"
         skills = tmp_path / "skills"
         tmp = tmp_path / "tmp"
 
@@ -41,6 +43,8 @@ model = "gpt-4"
 [sandbox]
 workspace_root = "{ws}"
 memory_root = "{mem}"
+state_root = "{state}"
+traces_root = "{traces}"
 skills_root = "{skills}"
 tmp_root = "{tmp}"
 """)

@@ -102,7 +102,6 @@ def _build_engine(
         compression = CompressionService(
             budget_tool=ReadToolResultBudgetTool(),
             llm=llm,
-            memory=mem,
         )
     engine = LoopEngine(
         session_key="default",
@@ -256,7 +255,6 @@ async def test_engine_records_act_span_for_wait_io(tmp_path: Path):
     comp = CompressionService(
         budget_tool=ReadToolResultBudgetTool(),
         llm=_WaitLLM(),
-        memory=mem,
     )
     engine = LoopEngine(
         session_key="default",

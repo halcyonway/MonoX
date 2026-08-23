@@ -1,4 +1,4 @@
-"""JsonlTraceStore：per-session `<memory_root>/<sk>/traces.jsonl` append-only。
+"""JsonlTraceStore：per-session `<traces_root>/<sk>/traces.jsonl` append-only。
 
 格式：每行一个完整 Run JSON（run_id 重复视为更新，新行覆盖旧 run）。
 
@@ -109,7 +109,7 @@ def _read_tail_runs(path: Path, max_bytes: int) -> dict[str, Run]:
 class JsonlTraceStore:
     """per-session jsonl 实现的 TraceStore。
 
-    path 由 SessionManager 在创建时给定（`memory_root / sk / traces.jsonl`）。
+    path 由 SessionManager 在创建时给定（`traces_root / sk / traces.jsonl`）。
     """
 
     path: Path

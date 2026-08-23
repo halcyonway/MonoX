@@ -92,7 +92,7 @@ class SessionManager:
     IDLE_TIMEOUT_SEC = 300
     SWEEP_INTERVAL_SEC = 30
 
-    def __init__(self, *, llm, tools, compression, memory_root,
+    def __init__(self, *, llm, tools, compression, state_root, traces_root,
                  time_fn=time.time, idle_timeout_sec=IDLE_TIMEOUT_SEC,
                  sweep_interval_sec=SWEEP_INTERVAL_SEC): ...
 
@@ -123,8 +123,9 @@ class SessionManager:
 ```
 
 **per-session 资源**：
-- `JsonlCheckpointStore(memory_root / session_key / "checkpoint.jsonl")` — 每 session 一份（多 session 不能共享一个 jsonl 文件）
-- `FsMemoryStore(memory_root)` — 共享实例（路径已 multi-tenant）
+- `JsonlCheckpointStore(state_root / session_key / "checkpoint.jsonl")` — 每 session 一份（多 session 不能共享一个 jsonl 文件，落在独立 state root —— Runtime 内部 state，跟 LLM shell cwd `workspace_root` 严格隔离）
+- `JsonlTraceStore(traces_root / session_key / "traces.jsonl")` — 每 session 一份，落在独立 traces root
+- `FsMemoryStore(memory_root)` — 共享实例（跨会话全局）
 - `LLMProxy` / `ToolRegistry` / `CompressionService` — 共享（无 session 状态）
 
 ### RuntimeServer

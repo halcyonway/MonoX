@@ -80,7 +80,6 @@ def _make_engine(
     compression = CompressionService(
         budget_tool=None,  # type: ignore[arg-type]
         llm=None,  # type: ignore[arg-type]
-        memory=mem,
     )
 
     engine = LoopEngine(
@@ -243,7 +242,6 @@ async def test_metric_carry_trace_id_with_tool_call(tmp_path: Path):
     compression = CompressionService(
         budget_tool=None,  # type: ignore[arg-type]
         llm=None,  # type: ignore[arg-type]
-        memory=mem,
     )
     engine = LoopEngine(
         session_key="default", system_prompt="sys", llm=mock,

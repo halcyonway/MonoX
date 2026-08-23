@@ -438,10 +438,12 @@ loop task。
 task + 注销 per-session consumer + 从 `_sessions` 删除。
 
 **恢复**：destroy 后新 inbound 到达 → 重新 `_create` → JsonlCheckpointStore 从
-`<memory_root>/<sk>/checkpoint.jsonl` 读历史 → LoopEngine `_restore` 重建上下文。
+`<state_root>/<sk>/checkpoint.jsonl` 读历史 → LoopEngine `_restore` 重建上下文。
 
 **per-session 隔离**：每个 `sk` 一份独立 `JsonlCheckpointStore`（多 session 不能
-共享 jsonl 文件）；`FsMemoryStore` / LLM / ToolRegistry / Compression 共享（无
+共享 jsonl 文件，落 `state_root/<sk>/` —— Runtime 内部 state，跟 LLM shell cwd
+`workspace_root/<sk>/` 严格隔离，LLM 不可见）；可观测性 `traces.jsonl` 落独立
+`traces_root/<sk>/`；`FsMemoryStore`（跨会话全局，落 `memory_root/`） / LLM / ToolRegistry / Compression 共享（无
 session 状态）。
 
 ### 12.7 HTTP `/health` 端点
