@@ -38,6 +38,7 @@ from core.protocol import (
     StreamEvent,
     TokenChunk,
     ToolEnd,
+    ToolPending,
     ToolResult,
     ToolStart,
 )
@@ -340,6 +341,9 @@ class LoopEngine:
             tool_calls: list[dict[str, Any]] = []
             finish_reason: str | None = None
             usage: dict | None = None
+            # 每个 call_id 是否已经发过 ToolPending；OpenAI 流式 delta 第一个就 set id，
+            # 后续 deltas 只是补 args —— 不要重复发。
+            pending_emitted: set[str] = set()
 
             await output_queue.put(
                 StatusChange(
@@ -358,6 +362,24 @@ class LoopEngine:
                         await output_queue.put(ReasoningChunk(text=chunk.delta_reasoning))
                     if chunk.delta_tool_calls:
                         _merge_tool_calls(tool_calls, chunk.delta_tool_calls)
+                        # 流式里**第一次**看到某个 call_id + name → 立刻发 ToolPending。
+                        # 这样 MonoDesk 可以马上出 loading 态，不用等到 args JSON 收齐 +
+                        # 解析完才出 ToolStart。
+                        for d in chunk.delta_tool_calls:
+                            idx = d.get("index", 0)
+                            if idx >= len(tool_calls):
+                                continue
+                            entry = tool_calls[idx]
+                            cid = entry.get("id", "")
+                            if cid and cid not in pending_emitted:
+                                pending_emitted.add(cid)
+                                name = entry["function"].get("name", "")
+                                await output_queue.put(ToolPending(
+                                    call_id=cid,
+                                    name=name,
+                                    tool_index=idx,
+                                    args_so_far=entry["function"].get("arguments", "") or "",
+                                ))
                     if chunk.finish_reason:
                         finish_reason = chunk.finish_reason
                     if chunk.usage:
@@ -466,7 +488,9 @@ class LoopEngine:
                 args_raw = tc.get("function", {}).get("arguments", "{}")
                 args = _safe_json(args_raw)
 
-                await output_queue.put(ToolStart(name=name, args=args))
+                # call_id 透传：前端把它和早些发的 ToolPending 配对成同一个块，
+                # 避免「pending 块 + tool_start 又创一个」双卡片。
+                await output_queue.put(ToolStart(name=name, args=args, call_id=call_id))
 
                 if name == WAIT_IO_NAME:
                     # wait_io: emit fake ok result，不真跑 tool

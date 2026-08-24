@@ -117,9 +117,26 @@ def tool_result_event_xml(call_id: str, result: ToolResult, *, tool: str | None 
 
 
 def _attachment_xml(f: File) -> str:
-    """File → <attachment> element（base64 编码 content）。"""
+    """File → <attachment> element.
+
+    Wire protocol：File.content 存 url 字节（UTF-8 decode 得到 URL 字符串）。
+    这种情况下渲染为 url 属性而非 base64 body（节省 token，且 LLM 可直接访问）。
+
+    如果 content 不是有效 URL 字符串，则降级为 base64 编码（兼容旧格式）。
+    """
+    url_bytes = f.content or b""
+    try:
+        url_str = url_bytes.decode("utf-8")
+        # 看起来像 URL → 渲染为 url 属性
+        if url_str.startswith("http://") or url_str.startswith("https://") or url_str.startswith("/"):
+            head = _attrs({"name": f.name, "mime": f.mime, "url": url_str})
+            return f"<attachment{head} />"
+    except UnicodeDecodeError:
+        pass
+
+    # 不是 URL 字符串 → base64 编码（真正的文件内容）
     import base64
-    b64 = base64.b64encode(f.content or b"").decode("ascii")
+    b64 = base64.b64encode(url_bytes).decode("ascii")
     head = _attrs({"name": f.name, "mime": f.mime})
     return f"<attachment{head}>{_escape(b64)}</attachment>"
 
@@ -137,11 +154,15 @@ User-side events:
   <event ts="1700000000.5" kind="user_input" channel="monodesk"
          event_type="user-input">
     user message body
+    <attachment name="screenshot.png" mime="image/png">base64-encoded-image-data...</attachment>
   </event>
   - `ts`: Unix seconds (float). Use to compute latency / ordering.
   - `kind`: user_input (interactive), command (slash command like /reset).
   - `channel`: source identifier (monodesk / terminal / cron / etc.).
   - `event_type`: sub-classification (user-input / scheduled-task / ...).
+  - `<attachment>`: inline file/image embedded as base64. The `name` attribute is the
+    original filename or path; `mime` is the MIME type (e.g. `image/png`).
+    You can call `multimodalunderstand(attachment_url="/path/to/file")` to analyze it.
 
 Tool-side events (in `role=tool` messages):
   <event kind="tool_result" call_id="c1" status="ok" exit_code="0"

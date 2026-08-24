@@ -4,8 +4,8 @@
     {"v": 1, "type": <one_of_13>, "seq": <int>, "ts": <float>, "data": <object>}
 
 13 个 `type` 字符串：
-- 出站（Runtime → Gateway）：hello, status, token, reasoning, tool_start, tool_end,
-                                metric, final, card, error
+- 出站（Runtime → Gateway）：hello, status, token, reasoning, tool_pending, tool_start,
+                                tool_end, metric, final, card, error
 - 入站（Gateway → Runtime）：user_input, command, interrupt
 
 本模块是 wire 协议的唯一事实来源；runtime server、gateway、desktop client
@@ -29,6 +29,7 @@ from core.protocol import (
     StreamEvent,
     TokenChunk,
     ToolEnd,
+    ToolPending,
     ToolResult,
     ToolStart,
 )
@@ -38,12 +39,13 @@ PROTOCOL_VERSION = 1
 
 
 class FrameType:
-    """13 个 wire frame type 字符串。集中定义避免魔法值。"""
+    """14 个 wire frame type 字符串。集中定义避免魔法值。"""
 
     HELLO = "hello"
     STATUS = "status"
     TOKEN = "token"
     REASONING = "reasoning"
+    TOOL_PENDING = "tool_pending"
     TOOL_START = "tool_start"
     TOOL_END = "tool_end"
     METRIC = "metric"
@@ -66,6 +68,7 @@ OUTBOUND_TYPES: frozenset[str] = frozenset({
     FrameType.STATUS,
     FrameType.TOKEN,
     FrameType.REASONING,
+    FrameType.TOOL_PENDING,
     FrameType.TOOL_START,
     FrameType.TOOL_END,
     FrameType.METRIC,
@@ -151,9 +154,18 @@ def to_frame(event: StreamEvent, *, session_key: str, seq: int = 0) -> dict[str,
     elif isinstance(event, ReasoningChunk):
         data["text"] = event.text
         ftype = FrameType.REASONING
+    elif isinstance(event, ToolPending):
+        data["call_id"] = event.call_id
+        data["name"] = event.name
+        data["tool_index"] = event.tool_index
+        data["args_so_far"] = event.args_so_far
+        ftype = FrameType.TOOL_PENDING
     elif isinstance(event, ToolStart):
         data["name"] = event.name
         data["args"] = event.args
+        # call_id 让前端把 pending → start 配对成同一个块，避免双 tool card
+        if event.call_id:
+            data["call_id"] = event.call_id
         ftype = FrameType.TOOL_START
     elif isinstance(event, ToolEnd):
         data["name"] = event.name
@@ -220,6 +232,23 @@ def from_frame(
         sk = data.get("session_key")
         if not isinstance(sk, str) or not sk:
             sk = default_session_key
+
+        # attachments: list of {url, name?, mime?} → tuple[File, ...]
+        # MonoDesk 上传文件到本地路径后，通过 ws 帧发送 url 过来。
+        raw_attachments: list[dict[str, Any]] = data.get("attachments") or []
+        attachments: list[File] = []
+        for a in raw_attachments:
+            if not isinstance(a, dict):
+                continue
+            url = a.get("url")
+            if not isinstance(url, str) or not url:
+                continue
+            attachments.append(File(
+                name=a.get("name") or url,
+                content=url.encode("utf-8"),
+                mime=a.get("mime", "image/png"),
+            ))
+
         return InboundEvent(
             session_key=sk,
             kind="message",
@@ -227,6 +256,7 @@ def from_frame(
             source=default_source,
             event_type="user-input",
             timestamp=ts,
+            attachments=tuple(attachments),
             meta=data.get("meta") or {},
         )
     if mtype == FrameType.COMMAND:
@@ -259,12 +289,18 @@ def inbound_to_frame(event: InboundEvent, seq: int = 0) -> dict[str, Any] | None
     - 其他 → None
     """
     if event.kind == "message":
+        # attachments: File.content 存 url 字节，encode 成字符串透传
+        attachments_data: list[dict[str, Any]] = []
+        for f in event.attachments:
+            url = f.content.decode("utf-8") if f.content else ""
+            attachments_data.append({"url": url, "name": f.name, "mime": f.mime})
         return _envelope(
             FrameType.USER_INPUT,
             seq,
             {
                 "session_key": event.session_key,
                 "text": event.text,
+                "attachments": attachments_data or None,
                 "meta": event.meta,
                 "ts": event.timestamp or time.time(),
             },
@@ -309,10 +345,18 @@ def frame_to_stream_event(payload: Any) -> StreamEvent | None:
         return TokenChunk(text=data.get("text", "") or "")
     if mtype == FrameType.REASONING:
         return ReasoningChunk(text=data.get("text", "") or "")
+    if mtype == FrameType.TOOL_PENDING:
+        return ToolPending(
+            call_id=data.get("call_id", "") or "",
+            name=data.get("name", "") or "",
+            tool_index=int(data.get("tool_index", 0) or 0),
+            args_so_far=data.get("args_so_far", "") or "",
+        )
     if mtype == FrameType.TOOL_START:
         return ToolStart(
             name=data.get("name", "") or "",
             args=data.get("args") or {},
+            call_id=data.get("call_id", "") or "",
         )
     if mtype == FrameType.TOOL_END:
         result_raw = data.get("result") or {}
