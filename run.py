@@ -38,6 +38,7 @@ from core.health_server import HealthServer, HealthServerConfig
 from core.llm_proxy import OpenAIStreamProxy
 from core.loop import (
     BashTool,
+    MultimodalUnderstandTool,
     ReadToolResultBudgetTool,
     SkillLoadTool,
     ToolRegistry,
@@ -49,12 +50,15 @@ from core.runtime_server import RuntimeServer
 from core.sandbox import BashRunner
 from core.session_manager import SessionManager
 from core.skill_service import SkillService
+from core.skill_sync import sync_extension_skills
 import core.loop.event_format  # noqa: F401 — used by DEFAULT_SYSTEM_TEMPLATE 字符串拼接
 
 
 DEFAULT_SYSTEM_TEMPLATE = """You are MonoX, a coding agent. You run inside a sandboxed bash environment.
 
 Plan briefly, then execute. Use bash for all I/O. Use skill_load to fetch details of a skill before invoking it.
+
+You can receive images as <attachment url="..."> elements in user events. To understand an image, call multimodalunderstand(attachment_url="...") with the file path or URL shown in the attachment's `url` attribute.
 
 Tool results may be L1-compressed; if you see budget_id, call read_tool_result_budget(budget_id=...) for the full version.
 
@@ -358,11 +362,19 @@ async def run(cfg_path: str, args: argparse.Namespace) -> None:
     runner = BashRunner()
     budget_tool = ReadToolResultBudgetTool()
     skills_root = Path(cfg.sandbox.skills_root)
+    # 启动时把公共 skill 库 sync 到 runtime：补缺失，不覆盖现有。
+    # 详见 spec/ARCHITECTURE.md 9.1
+    sync_extension_skills(
+        Path(cfg.sandbox.extensions_skills_dir),
+        skills_root,
+        state_path=Path(cfg.sandbox.state_root) / "skill-sync.json",
+    )
     skill_service = SkillService(skills_root, max_l1=cfg.sandbox.skills_max_l1)
     tools = ToolRegistry(
         [
             BashTool(runner, paths["workspace"]),
             SkillLoadTool(skill_service),
+            MultimodalUnderstandTool(),
             WaitIoTool(),
             budget_tool,
         ]
@@ -428,6 +440,7 @@ async def run(cfg_path: str, args: argparse.Namespace) -> None:
         DebugServerConfig(host=cfg.server.host, port=debug_port),
         trace_provider=FsTraceProvider(traces_root),
         skill_service=skill_service,
+        attachments_root=Path(cfg.sandbox.tmp_root),
     )
 
     print(

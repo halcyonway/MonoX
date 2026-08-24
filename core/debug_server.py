@@ -19,7 +19,19 @@
     → {"ok": true, "name": "..."}
 - POST /debug/skills/upload          （body = zip 字节）
     → {"added": ["foo", "bar"]}
+- POST /debug/attachments/upload     （body = 原始文件字节，Content-Type 决定 mime）
+    → {"url": "http://127.0.0.1:8768/debug/attachments/<uuid>.png", ...}
+- GET  /debug/attachments/<file>    返回上传的文件字节（绝对路径用 HTTP 喂回前端，
+                                     multimodalunderstand tool 也能直接走这条 URL）
+- OPTIONS /debug/*                  CORS preflight：浏览器 POST 带非 simple Content-Type
+                                     (e.g. image/png) 会先 OPTIONS，必须 204 + 头
+                                     否则浏览器拦掉真正的 POST → 上传静默失败。
 - 其他 → 404
+
+URL 设计：upload 返回的 `url` 是个**绝对 HTTP URL**，不是本地文件路径。
+原因：(1) 前端 `<img src=...>` 在浏览器里跨 origin 加载 file:// 直接被 CORS 拦；
+       (2) MiniMax vision API 是云服务，拿不到 localhost 本地文件。
+       HTTP URL 三方都能用同一份（前端渲染 / multimodalunderstand 走 fetch → base64）。
 
 MonoDesk dev 走 vite proxy 转 `/debug/*` → `http://127.0.0.1:8768`；
 prod Tauri 模式下由于是 desktop app 直接 fetch localhost，没跨域问题。
@@ -60,10 +72,12 @@ class DebugServer:
         *,
         trace_provider: TraceProvider,
         skill_service: SkillService | None = None,
+        attachments_root: Path | None = None,
     ) -> None:
         self._cfg = cfg
         self._trace_provider = trace_provider
         self._skill_service = skill_service
+        self._attachments_root = attachments_root
         self._stop = asyncio.Event()
         self._server: asyncio.base_events.Server | None = None
 
@@ -107,6 +121,18 @@ class DebugServer:
             await _write_404(writer)
             return
         method, path_q = parts[0], parts[1]
+
+        # CORS preflight：浏览器 POST 带非 simple Content-Type（e.g. image/png）会先
+        # 发 OPTIONS 探一下；不返回 204 + CORS 头浏览器就拦掉真正的 POST，
+        # 上传请求就静默 404。必须放在 method 白名单检查之前。
+        if method == "OPTIONS":
+            path_pre = urlsplit(path_q).path
+            if path_pre.startswith("/debug/"):
+                await _write_cors_preflight(writer)
+            else:
+                await _write_404(writer)
+            return
+
         if method not in ("GET", "PUT", "POST", "DELETE"):
             await _write_404(writer)
             return
@@ -198,7 +224,113 @@ class DebugServer:
         if self._skill_service is not None and path.startswith("/debug/skills"):
             await self._handle_skills(method, path, body_bytes, content_type, writer, cors)
             return
+        # ---- attachment 上传路由（需要注入 attachments_root）----
+        if path == "/debug/attachments/upload" and method == "POST":
+            await self._handle_attachment_upload(body_bytes, content_type, writer, cors)
+            return
+        # ---- attachment serve 路由：把上传过的文件字节喂回前端 / multimodal tool ----
+        if path.startswith("/debug/attachments/") and method == "GET":
+            await self._handle_attachment_serve(path, writer, cors)
+            return
         await _write_404(writer, extra_cors=cors)
+
+    async def _handle_attachment_upload(
+        self,
+        body_bytes: bytes,
+        content_type: str,
+        writer: asyncio.StreamWriter,
+        cors: bool,
+    ) -> None:
+        """POST /debug/attachments/upload — 保存文件到 attachments_root。
+
+        Content-Type 决定 MIME type（默认 image/png）。
+        返回 saved file 的 HTTP URL（`http://host:port/debug/attachments/<uuid>.png`），
+        前端 <img src> 直接用；multimodalunderstand tool 也用这个 URL（fetch + base64）。
+        """
+        root = self._attachments_root
+        if root is None:
+            await _send_json(writer, 500, {"error": "attachments not configured"}, extra_cors=cors)
+            return
+
+        import uuid
+        import os
+
+        # 从 Content-Type 提取 mime，e.g. "image/png" or "image/png; charset=..."
+        mime = content_type.split(";")[0].strip() or "image/png"
+        # 常见 image 扩展名
+        ext_map = {
+            "image/png": ".png",
+            "image/jpeg": ".jpg",
+            "image/gif": ".gif",
+            "image/webp": ".webp",
+        }
+        ext = ext_map.get(mime, "")
+        filename = f"{uuid.uuid4().hex}{ext}"
+
+        attachments_dir = root / "attachments"
+        try:
+            attachments_dir.mkdir(parents=True, exist_ok=True)
+            saved_path = attachments_dir / filename
+            saved_path.write_bytes(body_bytes)
+        except OSError as exc:
+            await _send_json(writer, 500, {"error": f"write failed: {exc}"}, extra_cors=cors)
+            return
+
+        _log.info("attachment saved: %s (%d bytes, mime=%s)", saved_path, len(body_bytes), mime)
+        # URL 用绝对 HTTP（不是本地路径）—— 前端 <img> 跨 origin 加载 file:// 被 CORS 拦；
+        # MiniMax vision API 也拿不到 localhost 本地文件。HTTP URL 三方通用。
+        url = f"http://{self._cfg.host}:{self._cfg.port}/debug/attachments/{filename}"
+        await _send_json(
+            writer, 200,
+            {
+                "url": url,
+                "name": filename,
+                "mime": mime,
+            },
+            extra_cors=cors,
+        )
+
+    async def _handle_attachment_serve(
+        self, path: str, writer: asyncio.StreamWriter, cors: bool,
+    ) -> None:
+        """GET /debug/attachments/<filename> — 把上传过的图片字节喂回调用方。
+
+    路径合法性：
+- 必须以 attachments/ 子目录为根（防 path traversal：`../` 直接拒绝）。
+- 文件名不含 `/`。
+    """
+        root = self._attachments_root
+        if root is None:
+            await _send_json(writer, 500, {"error": "attachments not configured"}, extra_cors=cors)
+            return
+        filename = path[len("/debug/attachments/"):]
+        if not filename or "/" in filename or "\\" in filename or ".." in filename:
+            await _send_json(writer, 400, {"error": "invalid filename"}, extra_cors=cors)
+            return
+        attachments_dir = (root / "attachments").resolve()
+        file_path = (attachments_dir / filename).resolve()
+        # 二次校验：resolve 后仍必须在 attachments_dir 下
+        if attachments_dir != file_path and attachments_dir not in file_path.parents:
+            await _send_json(writer, 400, {"error": "invalid filename"}, extra_cors=cors)
+            return
+        if not file_path.is_file():
+            await _send_json(writer, 404, {"error": "file not found"}, extra_cors=cors)
+            return
+        try:
+            body = file_path.read_bytes()
+        except OSError as exc:
+            await _send_json(writer, 500, {"error": f"read failed: {exc}"}, extra_cors=cors)
+            return
+        # 从扩展名推 mime（写文件时也用同样映射，对称）
+        ext_map = {
+            ".png": "image/png",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".gif": "image/gif",
+            ".webp": "image/webp",
+        }
+        mime = ext_map.get(file_path.suffix.lower(), "application/octet-stream")
+        await _send_bytes(writer, 200, mime, body, extra_cors=cors)
 
     async def _handle_skills(
         self,
@@ -385,6 +517,66 @@ async def _write_404(
     writer: asyncio.StreamWriter, *, extra_cors: bool = False
 ) -> None:
     await _send_json(writer, 404, {"error": "not found"}, extra_cors=extra_cors)
+
+
+async def _write_cors_preflight(writer: asyncio.StreamWriter) -> None:
+    """OPTIONS 探一下：浏览器 POST 带非 simple Content-Type (e.g. image/png) 之前
+    会先发 OPTIONS；不返回 204 + 完整 CORS 头浏览器就拦掉真正的 POST。
+
+    Max-Age 24h：避免每次请求都 preflight。
+    """
+    headers = [
+        "HTTP/1.1 204 No Content",
+        "Access-Control-Allow-Origin: *",
+        "Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS",
+        "Access-Control-Allow-Headers: Content-Type",
+        "Access-Control-Max-Age: 86400",
+        "Content-Length: 0",
+        "Connection: close",
+    ]
+    raw = ("\r\n".join(headers) + "\r\n\r\n").encode("ascii")
+    writer.write(raw)
+    try:
+        await writer.drain()
+    except Exception:
+        pass
+    try:
+        writer.close()
+    except Exception:
+        pass
+
+
+async def _send_bytes(
+    writer: asyncio.StreamWriter,
+    status: int,
+    mime: str,
+    body: bytes,
+    *,
+    extra_cors: bool,
+) -> None:
+    """Serve 二进制文件：状态行 + Content-Type + Content-Length + CORS（可选）+ body。
+
+    _send_json 只吃 dict；二进制文件流必须用这个。
+    """
+    status_text = {200: "OK", 400: "Bad Request", 404: "Not Found"}.get(status, "OK")
+    headers = [
+        f"HTTP/1.1 {status} {status_text}",
+        f"Content-Type: {mime}",
+        f"Content-Length: {len(body)}",
+        "Connection: close",
+    ]
+    if extra_cors:
+        headers.insert(2, "Access-Control-Allow-Origin: *")
+    raw = ("\r\n".join(headers) + "\r\n\r\n").encode("ascii") + body
+    writer.write(raw)
+    try:
+        await writer.drain()
+    except Exception:
+        pass
+    try:
+        writer.close()
+    except Exception:
+        pass
 
 
 # ----------------------------------------------------------------------

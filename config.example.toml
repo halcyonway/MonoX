@@ -81,6 +81,9 @@ memory_root    = "./.monox/memory"
 state_root     = "./.monox/state"
 traces_root    = "./.monox/traces"
 skills_root    = "./.monox/skills"
+# 公共 skill 库（git-tracked）。run.py 启动时把这里缺失的 skill 整目录拷到 skills_root。
+# 用户改 skill 必须改这里（不是 .monox/skills/），详见 spec/ARCHITECTURE.md 9.1
+extensions_skills_dir = "./extensions/skills"
 tmp_root       = "./.monox/tmp"
 # L1 skill 自动注入 system prompt 的上限；超限时按字典序截断并 warn
 skills_max_l1  = 50

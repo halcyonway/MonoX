@@ -48,6 +48,28 @@ class ReasoningChunk:
 class ToolStart:
     name: str
     args: dict[str, Any]
+    # call_id: OpenAI tool call id，用于把 ToolPending（早些发的）和 ToolStart 配对，
+    # 避免前端出现「pending 块 + tool_start 又创一个」的双块。
+    call_id: str = ""
+
+
+@dataclass(frozen=True)
+class ToolPending:
+    """LLM 流式响应里**第一次**看到某个 tool call 的 id+name 时立即发。
+
+    原 ToolStart 要等整段 args JSON 全部收到 + 解析完成才 fire，所以前端 tool block
+    要等很久才出现。ToolPending 是「开始调用了」信号，前端立刻展示 loading 态；
+    args 出完后再来 ToolStart 补上完整参数（同一个 call_id），前端 update 而非新建。
+
+    - call_id: 与后续 ToolStart 对应的 OpenAI tool call id
+    - name: function name（streaming 第一个 delta 通常就 set 了）
+    - tool_index: 同 turn 内的并行 tool call 序号（OpenAI streaming format 字段）
+    - args_so_far: 已经流到的部分 arguments JSON，前端可以做"参数预览中"展示
+    """
+    call_id: str
+    name: str
+    tool_index: int
+    args_so_far: str
 
 
 @dataclass(frozen=True)
@@ -96,6 +118,7 @@ class ErrorEvent:
 StreamEvent = Union[
     TokenChunk,
     ReasoningChunk,
+    ToolPending,
     ToolStart,
     ToolEnd,
     StatusChange,

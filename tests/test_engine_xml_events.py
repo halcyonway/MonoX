@@ -135,6 +135,7 @@ async def _drive_one_run(engine: LoopEngine, in_q: asyncio.Queue, out_q: asyncio
         pass
 
 
+@pytest.mark.slow
 @pytest.mark.asyncio
 async def test_user_message_in_xml_event_format(tmp_path: Path) -> None:
     """user_input 进 LLM context 时是 XML event，含 ts / channel / kind attrs。"""
@@ -159,6 +160,7 @@ async def test_user_message_in_xml_event_format(tmp_path: Path) -> None:
     assert "你好" in content
 
 
+@pytest.mark.slow
 @pytest.mark.asyncio
 async def test_tool_result_in_xml_event_format(tmp_path: Path) -> None:
     """tool result 进 LLM context 时是 XML event，含 stdout / stderr 子元素 + tool attr。"""
@@ -189,6 +191,7 @@ async def test_tool_result_in_xml_event_format(tmp_path: Path) -> None:
     assert stderr_el is not None
 
 
+@pytest.mark.slow
 @pytest.mark.asyncio
 async def test_xml_event_with_special_chars_is_escaped(tmp_path: Path) -> None:
     """特殊字符在 XML event 里被 escape，避免破坏结构。"""
@@ -207,6 +210,7 @@ async def test_xml_event_with_special_chars_is_escaped(tmp_path: Path) -> None:
     assert stdout_el.text == '<raw> & "quoted"</raw>'
 
 
+@pytest.mark.slow
 @pytest.mark.asyncio
 async def test_user_xml_event_has_no_json_artifacts(tmp_path: Path) -> None:
     """regression：之前是纯文本 / 裸 JSON，现在是 XML。"""
@@ -257,6 +261,7 @@ async def test_l2_compression_preserves_xml_event_messages(tmp_path: Path) -> No
             ET.fromstring(m["content"].split("\n")[0] + "\n" + m["content"].split("\n")[-1] if "\n" in m["content"] else m["content"])
 
 
+@pytest.mark.slow
 @pytest.mark.asyncio
 async def test_event_format_well_formed_in_user_messages_after_drain(tmp_path: Path) -> None:
     """简化版 drain 测试：直接把多个 user event 放 queue 里再启动 engine，

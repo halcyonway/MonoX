@@ -256,11 +256,31 @@ InboundEvent
 |---|---|---|
 | `channels/<name>/` | 每个 channel 一个包（`monodesk` / `terminal` / `feishu` / `textual_chat`），含 `__main__.py` + `__init__.py` | 实现 `Channel`，由 `__main__.py` 起独立进程 |
 | `channels/_runtime.py` | 共享 mini-runtime helper（`run_channel(channel, ws_client)` 起 channel + 双 pump gather） | 私有 helper，不属于 core |
+| `skills/<name>/` | git-tracked 公共 skill（SKILL.md + 配套脚本 / templates） | source of truth；sync 到 `.monox/skills/` |
+
+### 9.1 Skill source of truth 与 sync 语义
+
+**`extensions/skills/<name>/` 是 skill 的 source of truth**。`.monox/skills/<name>/`
+是运行时副本（gitignored），`SkillService` 只读 runtime 那份。
+
+`run.py` 启动时调 `core.skill_sync.sync_extension_skills()`：
+
+| runtime 状态 | extensions 有这个 skill | 行为 |
+|---|---|---|
+| 不存在 | ✅ | `shutil.copytree` 整目录拷过去（auto-resurrect on delete） |
+| 存在 | ✅ | **跳过，不动**（用户可能改过；想刷回 extensions 版本就 `rm -rf .monox/skills/<name>` 后重启） |
+| 不存在 | ❌ | 不动；runtime 里没有这个 skill 是用户的决定 |
+| extensions 不存在 | n/a | 静默跳过（公共 skill 库是可选的） |
+
+**用户工作流**：改任何 skill（写 prompt、加 helper script、调 frontmatter）都改
+`extensions/skills/<name>/` 那份。改完重启 runtime，sync 把更新同步过来。
+不要直接改 `.monox/skills/` —— 下次启动还是会被 extensions 覆盖回老版本。
 
 新增 channel：在 `extensions/channels/<name>/` 加包 + 实现 `Channel`，启动用
 `uv run python -m extensions.channels.<name> --runtime-url=...`。`extensions/channels/_runtime.py`
 的 `run_channel` 自动串好 ws pump。
-新增 skill：放 `extensions/skills/<name>/SKILL.md`。
+新增 skill：放 `extensions/skills/<name>/SKILL.md`（git track），不需要手动拷到
+`.monox/skills/` —— 启动时 sync 自动铺平。
 
 ---
 
