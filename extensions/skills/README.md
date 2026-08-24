@@ -1,41 +1,21 @@
 # extensions/skills/
 
-git-tracked 的「公共 skill 库」。这里放的是 MonoX 开箱即用的 skill 模板，
-用户可以按下面任意一种方式装到本地运行时：
+git-tracked 的「公共 skill 库」。这里是 MonoX 开箱即用的 skill 模板集合，
+**不需要手动安装** —— `run.py` 启动时会自动 sync 到 `.monox/skills/`（runtime
+副本目录，`SkillService` 实际读的就是这里）。
 
-## 安装方式
+## 工作流
 
-### 方式 A：拷贝（推荐，最简单）
+`extensions/skills/<name>/` 是 **source of truth**（git-tracked）。要改任何
+skill（写 prompt、加 helper script、调 frontmatter）都改这里。`run.py` 启动
+时通过 `core.skill_sync.sync_extension_skills()` 自动把这里缺失的 skill 拷到
+`.monox/skills/`，LLM 下个 turn 就能用。
 
-```sh
-# 单 skill
-cp -r extensions/skills/i2i .monox/skills/
+**不要直接改 `.monox/skills/`** —— 下次启动 sync 会发现 extensions 没有但
+runtime 没有（或者反之），按「补缺失不覆盖」策略不动；但语义上 runtime 是
+副本，权威版本在 extensions。
 
-# 全部
-cp -r extensions/skills/* .monox/skills/
-```
-
-拷贝后这些 skill 立刻被 `SkillService` 发现（`<skills_root>/<name>/SKILL.md`
-是 MonoX 的约定），重启 MonoX 后 LLM 就能用。
-
-### 方式 B：软链（开发时常用，源文件改了立即生效）
-
-```sh
-ln -s "$(pwd)/extensions/skills/i2i" .monox/skills/i2i
-```
-
-### 方式 C：直接改 `skills_root`
-
-在 `config.toml` 里把 `skills_root` 指到 extensions/skills/：
-
-```toml
-[sandbox]
-skills_root = "./extensions/skills"
-```
-
-适合想完全用 git-tracked 版本的场景（个人 skill 仍可放在 `.monox/skills/`，
-MonoX 会同时扫两个 root —— 但当前实现是单一 root，需要扩展才能两个都扫，
-见 [MonoX PR #2 局限](#monox-pr-2-局限)）。
+完整 sync 语义 + 边界 case 见 [`spec/ARCHITECTURE.md` 第 9.1 节](../../spec/ARCHITECTURE.md#91-skill-source-of-truth-与-sync-语义)。
 
 ## 目录约定
 
@@ -62,19 +42,37 @@ tier: 1                       # 1 = L1 自动注入 prompt；2 = L2 关键词触
 
 完整 schema 见 `core/skill_service.py` 的 `_parse_frontmatter()`。
 
+## sync 行为速查
+
+| 状态 | sync 行为 |
+|---|---|
+| runtime 没有 extensions 里有 | 整目录拷过去（**auto-resurrect** on delete）|
+| runtime 已有 | **跳过**，runtime 那份优先（用户可能改过）|
+| runtime 有 extensions 没有 | 不动（用户的私人 skill）|
+| extensions 目录本身不存在 | 静默 noop |
+| extensions/<name>/ 没有 SKILL.md | 跳过（非法 entry，不算 skill）|
+| sync 结果 | 写到 `.monox/state/skill-sync.json` |
+
+**强制刷回 extensions 版本**：删 runtime 那份后重启即可：
+```sh
+rm -rf .monox/skills/i2i   # 删本地副本
+python run.py config.toml  # 启动 → sync 把 extensions/i2i 重新拷过来
+```
+
 ## 当前内置 skill
 
 | skill | 说明 | tier |
 |---|---|---|
 | `i2i/` | 阿里云百炼 qwen-image-3.0 I2I（图生图）。模板 CRUD + 应用模板 + 实时 prompt。需要 `DASHSCOPE_API_KEY` env var。 | 1 |
 
-## MonoX PR #2 局限
+## 配置项
 
-`SkillService` 当前只读 `config.toml` 里 `sandbox.skills_root` 单一 root。
-如果用户想同时用 git-tracked 的公共 skill + 自己的私人 skill，需要：
+`config.toml` 的 `[sandbox]` 段：
 
-1. 把 `skills_root` 改成 list（schema 升级）
-2. `SkillService` 启动时按顺序扫多个 root，名字冲突时优先前面的
+```toml
+[sandbox]
+skills_root = "./.monox/skills"        # runtime 副本（gitignored）
+extensions_skills_dir = "./extensions/skills"   # 公共 skill 库（git-tracked）
+```
 
-短期 workaround：把 `extensions/skills/*` 拷到 `.monox/skills/`，私人 skill
-也放在 `.monox/skills/`，两者平铺混在一起（skill name 不能冲突）。
+两者都是相对路径（相对 cwd）。`run.py` 启动时自动调 sync，**一般情况下不需要手动调**。

@@ -66,6 +66,7 @@ class SandboxConfig:
     state_root: str = "/var/agent/state"
     traces_root: str = "/var/agent/traces"
     skills_root: str = "/var/agent/skills"
+    extensions_skills_dir: str = "./extensions/skills"  # 公共 skill 库（git-tracked），启动时 sync 到 skills_root
     tmp_root: str = "/var/agent/tmp"
     skills_max_l1: int = 50  # L1 skill 注入 system prompt 的上限
 
