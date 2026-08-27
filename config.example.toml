@@ -12,6 +12,7 @@ api_base = "https://api.openai.com/v1"
 api_key = "${OPENAI_API_KEY}"
 model = "gpt-4"
 timeout = 60
+provider_name = "openai"
 
 # [llm.options]
 # temperature = 0.7
@@ -22,6 +23,30 @@ timeout = 60
 
 # [llm.custom]
 # your_custom_field = "value"
+
+# ============================================================
+# [providers] 模型 provider 配置
+# ============================================================
+# key=自定义 provider 名，value=真实连接配置。
+# 真实凭证只引用环境变量，不写死在文件里。
+#
+# 使用方式：user_input 的 meta.model_provider 指定 provider 名，
+# LlmProxy 查 providers[provider_name] 得到 base_url / api_key / model_real_name。
+#
+# 如无需多 provider 切换，可不配置本节。
+
+[providers.openai]
+model_real_name = "gpt-4o-mini"
+base_url = "https://api.openai.com/v1"
+apikey_env = "OPENAI_API_KEY"
+timeout = 60
+
+[providers.claude]
+model_real_name = "claude-sonnet-4-20250514"
+base_url = "https://api.anthropic.com/v1"
+apikey_env = "ANTHROPIC_API_KEY"
+timeout = 120
+# extra_params = { thinking_max_tokens = 16000 }
 
 # Required independent compression model (L2 conversation summarization).
 # 这里填占位值即可；可填主模型同款，或换一个更便宜的模型。

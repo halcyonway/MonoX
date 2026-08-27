@@ -1,4 +1,4 @@
-"""OpenAIStreamProxy._normalize_usage：把 OpenAI stream final chunk 的嵌套 usage
+"""LlmProxy._normalize_usage：把 OpenAI stream final chunk 的嵌套 usage
 拍平，提取 prompt_tokens_details.cached_tokens 到 usage 顶层。
 
 为什么：reasoning span 直接拿 usage dict 渲染，UI 要看 cached_tokens，所以把它
@@ -6,7 +6,7 @@
 """
 from __future__ import annotations
 
-from core.llm_proxy.openai_stream import _normalize_usage
+from core.llm_proxy.proxy import _normalize_usage
 
 
 def test_normalize_usage_extracts_cached_tokens():

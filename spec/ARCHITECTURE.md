@@ -98,7 +98,7 @@ run_channel），不属于 core。
 | 协议 | 职责 | 当前实现 | 消费者 |
 |---|---|---|---|
 | `Channel` | 双向桥接外部信号与 core | `extensions/channels/*` | `gateway` |
-| `LLMProxy` | 流式调用 LLM，产出 `LlmChunk` | `core/llm_proxy/OpenAIStreamProxy` | `loop/engine` |
+| `LLMProxy` | 流式调用 LLM，产出 `LlmChunk` | `core/llm_proxy/proxy.py` | `loop/engine` |
 | `Tool` | 可被 agent 调用的工具 | `core/loop/tools/*` | `loop/engine` |
 | `CheckpointStore` | 对话历史持久化 + 恢复 | `core/loop/checkpoint.py` | `loop/engine` |
 | `MemoryStore` | 长期记忆读写 | `core/memory/fs_store.py` | `loop/engine` |
@@ -167,7 +167,7 @@ core 内部同样按「子模块 + 协议」组织。
 | `event_wrapper.py` | 入站 XML 包装 / 出站 `<send>` 路由 | 纯函数，无协议 |
 | `runtime_server.py` | Runtime 端 ws server（`RuntimeServer`） | 消费 `InboundEvent` / `StreamEvent` |
 | `loop/` | ReAct 主循环 + 工具注册 | 消费 `LLMProxy`/`Tool`/`CheckpointStore`/`MemoryStore` |
-| `llm_proxy/` | OpenAI-compatible 流式调用 | 实现 `LLMProxy` |
+| `llm_proxy/` | LLM 流式调用（含 providers 配置支持） | 实现 `LLMProxy` |
 | `sandbox/` | bash 执行后端 | 实现 `SandboxRunner` |
 | `memory/` | 记忆存储 | 实现 `MemoryStore` |
 | `config.py` | 统一 `config.toml` 加载（含 `[server]` 段） | 无协议 |

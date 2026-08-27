@@ -36,6 +36,7 @@ spec/
 │   ├── feishu-channel.md     # 飞书接入
 │   ├── context-compression.md # L0/L1/L2 上下文压缩
 │   ├── shutdown.md           # engine 响应 channel 关闭
+│   ├── interrupt.md          # LoopEngine 运行中打断（独立中断队列 + 最高优先级）
 │   ├── runtime-lifecycle.md  # PID 文件 / --stop / channel supervisor（操作员级进程管理）
 │   └── llm-harness.md       # LLMProxy retry/fallback/rate-limit
 └── commits/               # 每个 git commit 的总结（按 SHA 划分）

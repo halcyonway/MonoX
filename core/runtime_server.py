@@ -22,7 +22,10 @@ from __future__ import annotations
 import asyncio
 import itertools
 import json
+import logging
 import sys
+
+_log = logging.getLogger("monox.runtime_server")
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
@@ -32,7 +35,7 @@ from websockets.asyncio.server import ServerConnection, serve
 from websockets.exceptions import ConnectionClosed
 
 from core.protocol import InboundEvent, StreamEvent
-from core.protocol.wire_frames import decode, frame_to_stream_event, from_frame, to_frame
+from core.protocol.wire_frames import decode, frame_to_stream_event, from_frame, hello_frame, to_frame
 
 
 @dataclass(frozen=True)
@@ -68,10 +71,14 @@ class RuntimeServer:
         *,
         default_session_key: str = "default",
         default_source: str = "unknown",
+        default_model: str = "gpt-4",
+        providers: dict[str, Any] | None = None,
     ) -> None:
         self._cfg = cfg
         self._default_session_key = default_session_key
         self._default_source = default_source
+        self._default_model = default_model
+        self._providers = providers or {}
 
         # source（channel 名）→ ws conn。一个 channel 一条连接，服务其所有 session_key。
         self._clients: dict[str, ServerConnection] = {}
@@ -223,6 +230,17 @@ class RuntimeServer:
             self._clients[source] = ws
             # 该 channel 的 default session 视为隐式 last_active（让首次连接后产生的下行事件有出口）
             self._last_active_source[session_key] = source
+
+        # 回复 hello：告知客户端当前 model 和所有可用 providers（让 MonoDesk 渲染下拉框）
+        # seq 走同一单调计数器，客户端看到的帧序号保持全局唯一
+        hello = hello_frame(
+            session_key=session_key,
+            model=self._default_model,
+            seq=next(self._seq),
+            providers=list(self._providers.keys()) or None,
+        )
+        _log.info("sending hello to client: model=%s providers=%s", self._default_model, list(self._providers.keys()))
+        await ws.send(json.dumps(hello, ensure_ascii=False, default=str))
 
         if first_ev is not None:
             await self._dispatch_inbound(first_ev)

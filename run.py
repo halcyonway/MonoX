@@ -35,7 +35,7 @@ from core.config import Config, session_paths
 from core.logging_setup import setup_logging
 from core.debug_server import DebugServer, DebugServerConfig, FsTraceProvider
 from core.health_server import HealthServer, HealthServerConfig
-from core.llm_proxy import OpenAIStreamProxy
+from core.llm_proxy import LlmProxy
 from core.loop import (
     BashTool,
     MultimodalUnderstandTool,
@@ -387,8 +387,9 @@ async def run(cfg_path: str, args: argparse.Namespace) -> None:
             "configure it in config.toml"
         )
 
-    llm = OpenAIStreamProxy(cfg.llm)
-    compression_llm = OpenAIStreamProxy(cfg.compression_llm)
+    # LLMConfig 在 Config.from_dict() 里已经注入了 providers，直接用即可
+    llm = LlmProxy(cfg.llm)
+    compression_llm = LlmProxy(cfg.compression_llm)
 
     compression = CompressionService(
         budget_tool=budget_tool,
@@ -402,6 +403,8 @@ async def run(cfg_path: str, args: argparse.Namespace) -> None:
     server = RuntimeServer(
         cfg.server,
         default_session_key=cfg.session_key,
+        default_model=cfg.llm.model,
+        providers=cfg.providers,
     )
 
     # SessionManager ↔ RuntimeServer 通过 async 回调协作

@@ -117,17 +117,29 @@ def _envelope(ftype: str, seq: int, data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def hello_frame(session_key: str, model: str, seq: int = 0) -> dict[str, Any]:
+def hello_frame(
+    session_key: str,
+    model: str,
+    seq: int = 0,
+    *,
+    providers: list[str] | None = None,
+    model_provider: str | None = None,
+) -> dict[str, Any]:
     """连接握手：服务端发给客户端。
 
     server 侧发（monoDesk adapter 发给 desktop client）。
     Runtime ↔ Gateway 这层不发 hello——Runtime 通过 session_key 注册 connection。
+
+    Args:
+        providers: 所有可用 provider 名列表（让 MonoDesk 渲染下拉框）
+        model_provider: 当前 session 使用的 provider 名
     """
-    return _envelope(
-        FrameType.HELLO,
-        seq,
-        {"session_key": session_key, "model": model},
-    )
+    data: dict[str, Any] = {"session_key": session_key, "model": model}
+    if providers is not None:
+        data["providers"] = providers
+    if model_provider is not None:
+        data["model_provider"] = model_provider
+    return _envelope(FrameType.HELLO, seq, data)
 
 
 def to_frame(event: StreamEvent, *, session_key: str, seq: int = 0) -> dict[str, Any] | None:
@@ -178,6 +190,8 @@ def to_frame(event: StreamEvent, *, session_key: str, seq: int = 0) -> dict[str,
             data["trace_id"] = event.trace_id
         if event.turn_id is not None:
             data["turn_id"] = event.turn_id
+        if event.model is not None:
+            data["model"] = event.model
         ftype = FrameType.METRIC
     elif isinstance(event, FinalMessage):
         data["text"] = event.text
@@ -394,6 +408,7 @@ def frame_to_stream_event(payload: Any) -> StreamEvent | None:
             metrics=data.get("metrics") or {},
             trace_id=data.get("trace_id"),
             turn_id=data.get("turn_id"),
+            model=data.get("model"),
         )
     if mtype == FrameType.FINAL:
         return FinalMessage(
