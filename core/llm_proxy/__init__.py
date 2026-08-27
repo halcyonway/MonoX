@@ -1,3 +1,3 @@
-from .openai_stream import OpenAIStreamProxy
+from .proxy import LlmProxy
 
-__all__ = ["OpenAIStreamProxy"]
+__all__ = ["LlmProxy"]

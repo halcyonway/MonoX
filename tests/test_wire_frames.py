@@ -44,7 +44,7 @@ def test_protocol_version_is_1():
 def test_inbound_outbound_types_disjoint():
     assert INBOUND_TYPES.isdisjoint(OUTBOUND_TYPES)
     assert len(INBOUND_TYPES) == 3
-    assert len(OUTBOUND_TYPES) == 10
+    assert len(OUTBOUND_TYPES) == 11
 
 
 # ----------------------------------------------------------------------

@@ -17,7 +17,7 @@ import shutil
 from pathlib import Path
 
 from core.channel.base import Channel
-from core.llm_proxy import OpenAIStreamProxy  # noqa: F401  验证 import
+from core.llm_proxy import LlmProxy  # noqa: F401  验证 import
 from tests._inprocess_bridge import InProcessBridge
 from core.loop.checkpoint import JsonlCheckpointStore
 from core.loop.compression import CompressionService

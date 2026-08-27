@@ -32,6 +32,19 @@ def _expand_env(data: Any) -> Any:
 
 
 @dataclass(frozen=True)
+class ModelProvider:
+    """provider 配置。key=自定义名，value=本结构。
+
+    真实凭证只允许引用环境变量（${VAR}），不写死在文件里。
+    """
+    model_real_name: str  # 送给厂家的 model 字段（如 "gpt-4o"）
+    base_url: str  # 如 "https://api.openai.com/v1"
+    apikey_env: str  # 环境变量名，如 "OPENAI_API_KEY"
+    timeout: int = 60
+    extra_params: dict[str, Any] = field(default_factory=dict)  # 模型特定参数
+
+
+@dataclass(frozen=True)
 class LLMConfig:
     api_base: str = ""
     api_key: str = ""
@@ -40,6 +53,10 @@ class LLMConfig:
     options: dict[str, Any] = field(default_factory=dict)  # 默认 sampling 参数
     extra_params: dict[str, Any] = field(default_factory=dict)  # 模型特定参数（透传 API）
     custom: dict[str, Any] = field(default_factory=dict)  # 自定义参数，透传 request body
+    # provider 引用：优先于 api_base/api_key；由 LlmProxy 解析真实凭证
+    provider_name: str | None = None
+    # providers 字典：key=provider名，value=ModelProvider
+    providers: dict[str, "ModelProvider"] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -91,6 +108,9 @@ class Config:
     sandbox: SandboxConfig = field(default_factory=SandboxConfig)
     multi_channel: MultiChannelConfig = field(default_factory=MultiChannelConfig)
     server: ServerConfig = field(default_factory=ServerConfig)
+    # providers 在 Config 层存一份（给 RuntimeServer 发 hello 帧用），
+    # LLMConfig 里也有一份（给 LlmProxy 解析用）。
+    providers: dict[str, ModelProvider] = field(default_factory=dict)
 
     @classmethod
     def load(cls, path: str | Path) -> "Config":
@@ -123,6 +143,35 @@ class Config:
             channel_raw=ch_data,
         )
 
+        # 解析 providers（先于 LLMConfig 构造，LLMConfig 需要 providers 字段）
+        # TOML [providers.foo.bar] 嵌套表会被解析成嵌套 dict，
+        # 用递归把它扁平化成单层 dict，key 用 "." 连接（如 "foo.bar"）。
+        def _flatten_providers(d: Any, prefix: str = "") -> dict[str, Any]:
+            result: dict[str, Any] = {}
+            if not isinstance(d, dict):
+                return result
+            for k, v in d.items():
+                full_key = f"{prefix}.{k}" if prefix else k
+                if isinstance(v, dict) and "model_real_name" not in v and "base_url" not in v:
+                    # 仍然是嵌套 dict 但不是 ModelProvider → 继续递归
+                    result.update(_flatten_providers(v, full_key))
+                else:
+                    result[full_key] = v
+            return result
+
+        providers_raw = data.get("providers", {})
+        flat_providers = _flatten_providers(providers_raw)
+        providers = {
+            name: ModelProvider(
+                model_real_name=v.get("model_real_name", ""),
+                base_url=v.get("base_url", ""),
+                apikey_env=v.get("apikey_env", ""),
+                timeout=v.get("timeout", 60),
+                extra_params=v.get("extra_params", {}),
+            )
+            for name, v in flat_providers.items()
+        }
+
         llm = LLMConfig(
             api_base=llm_raw.get("api_base", ""),
             api_key=llm_raw.get("api_key", ""),
@@ -131,6 +180,8 @@ class Config:
             options=llm_raw.get("options", {}),
             extra_params=llm_raw.get("extra_params", {}),
             custom=llm_raw.get("custom", {}),
+            provider_name=llm_raw.get("provider_name"),
+            providers=providers,
         )
 
         # 独立压缩模型：未配置的字段回退到主 llm
@@ -145,6 +196,8 @@ class Config:
                 options=comp_raw.get("options", llm.options),
                 extra_params=comp_raw.get("extra_params", llm.extra_params),
                 custom=comp_raw.get("custom", llm.custom),
+                provider_name=comp_raw.get("provider_name", llm.provider_name),
+                providers=providers,
             )
 
         return cls(
@@ -155,6 +208,7 @@ class Config:
             sandbox=SandboxConfig(**data.get("sandbox", {})),
             multi_channel=multi_ch,
             server=ServerConfig(**data.get("server", {})),
+            providers=providers,
         )
 
 

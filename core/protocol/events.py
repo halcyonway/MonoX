@@ -93,6 +93,8 @@ class MetricChunk:
     # 可观测性：metric chunk 所属 run / turn。
     trace_id: str | None = None
     turn_id: str | None = None
+    # 本次 LLM 调用真实使用的 model 名（provider 解析后），跨 provider 切换时 UI 据此刷新。
+    model: str | None = None
 
 
 @dataclass(frozen=True)

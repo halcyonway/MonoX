@@ -128,10 +128,22 @@ class ServerHandle:
 
 
 def _recv_frame(ws, timeout: float = 2.0) -> dict[str, Any]:
-    raw = ws.recv(timeout=timeout)
-    if isinstance(raw, (bytes, bytearray)):
-        raw = raw.decode("utf-8")
-    return json.loads(raw)
+    """收下一帧业务帧；新协议连接建立时 server 会先发 hello，跳过之。"""
+    while True:
+        raw = ws.recv(timeout=timeout)
+        if isinstance(raw, (bytes, bytearray)):
+            raw = raw.decode("utf-8")
+        frame = json.loads(raw)
+        if frame.get("type") != "hello":
+            return frame
+
+
+def _drain_hello(ws) -> None:
+    """吞掉 ws 上连接建立时收到的那一帧 hello（若已收不到则忽略异常）。"""
+    try:
+        _recv_frame(ws, timeout=2.0)
+    except Exception:
+        pass
 
 
 def _hello_frame(session_key: str, source: str, model: str = "") -> dict[str, Any]:
@@ -273,7 +285,10 @@ def test_fanout_only_to_last_active_source_session_key():
 
         f2 = _recv_frame(ws2, timeout=2)
         assert f2["type"] == "status" and f2["data"]["state"] == "thinking"
-        # ws1 应该收不到
+        # ws1 已被 server 主动 close；连接建立时它没收到 hello（hello 是在
+        # close 之后才到的代码路径上发的），但旧行为下 ws1.recv 直接抛 ConnectionClosed；
+        # 新行为下可能先收到 hello 再 close。两种情况都满足"收不到业务帧"。
+        _drain_hello(ws1)
         with pytest.raises(Exception):
             ws1.recv(timeout=0.3)
         ws1.close(); ws2.close()
@@ -326,6 +341,8 @@ def test_same_session_source_replaces_old():
         asyncio.run_coroutine_threadsafe(out_q.put(TokenChunk(text="x")), h._loop).result(timeout=2)
         f2 = _recv_frame(ws2, timeout=2)
         assert f2["type"] == "token"
+        # ws1 已被 server close；先把连接时的 hello 帧消费掉，再断言 timeout
+        _drain_hello(ws1)
         with pytest.raises(Exception):
             ws1.recv(timeout=0.3)
         ws1.close(); ws2.close()
