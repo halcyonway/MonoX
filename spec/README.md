@@ -38,7 +38,8 @@ spec/
 │   ├── shutdown.md           # engine 响应 channel 关闭
 │   ├── interrupt.md          # LoopEngine 运行中打断（独立中断队列 + 最高优先级）
 │   ├── runtime-lifecycle.md  # PID 文件 / --stop / channel supervisor（操作员级进程管理）
-│   └── llm-harness.md       # LLMProxy retry/fallback/rate-limit
+│   ├── llm-harness.md       # LLMProxy retry/fallback/rate-limit
+│   └── async-task.md        # 异步任务（subagent 是经典场景）：fork_task / poll / cancel + MonoDesk Tasks 面板
 └── commits/               # 每个 git commit 的总结（按 SHA 划分）
 ```
 
