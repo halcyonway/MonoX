@@ -1,25 +1,21 @@
-"""Interrupt 真打断测试。
+"""interrupt.md 验收测试：双队列分流 + 三检查点 + 哨兵收敛。
 
-验证 MonoDesk 用户在 agent 长输出中途点「停止」时：
-- 当前 react step 被取消（不再产生新 token）
-- messages / step_idx / session_metric 回滚到 step 开始前
-- 后续 user message 走新 react（无残留）
-
-对比：之前 interrupt 帧只是被当作普通 user msg append（无 effect）。
+覆盖 spec/REQUIREMENTS/interrupt.md「验证」节的六个场景。
+直接驱动 LoopEngine.run(input_q, out_q)，不经 Gateway / channel adapter。
 """
 from __future__ import annotations
 
 import asyncio
-import shutil
+from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import Any
 
-from core.channel.base import Channel
-from tests._inprocess_bridge import InProcessBridge as Gateway
+import pytest
+
 from core.loop.checkpoint import JsonlCheckpointStore
 from core.loop.compression import CompressionService
 from core.loop.engine import LoopEngine
 from core.loop.tool_registry import ToolRegistry
-from core.loop.tools import BashTool, ReadToolResultBudgetTool, SkillLoadTool, WaitIoTool
 from core.memory import FsMemoryStore
 from core.protocol import (
     FinalMessage,
@@ -28,183 +24,281 @@ from core.protocol import (
     LLMProxy,
     StatusChange,
     StreamEvent,
-    ToolEnd,
 )
-from core.sandbox import BashRunner
-from core.skill_service import SkillService
 
 
-class SlowLLM(LLMProxy):
-    """第一步吐 30 个 token，每个 100ms（3s 完成）；第二步 finalize。"""
+class _StreamingLLM(LLMProxy):
+    """多轮流式 mock：chunk 间让出控制权，给 C3 检查点命中机会。"""
 
-    def __init__(self) -> None:
-        self._step = 0
+    def __init__(self, call_texts: list[str]) -> None:
+        self.call_texts = call_texts
+        self.calls = 0
 
-    async def stream(self, messages, tools=None, options=None):
-        step = self._step
-        self._step += 1
-        if step == 0:
-            for i in range(30):
-                await asyncio.sleep(0.1)
-                yield LlmChunk(delta_text=f"t{i} ")
-            yield LlmChunk(finish_reason="stop")
-        else:
-            yield LlmChunk(delta_text="second turn", finish_reason="stop")
-
-
-class StubChannel(Channel):
-    def __init__(self) -> None:
-        self._queue: asyncio.Queue[InboundEvent] = asyncio.Queue()
-        self._stop = asyncio.Event()
-        self._sent: list[StreamEvent] = []
-
-    async def start(self) -> None: pass
-    async def stop(self) -> None: self._stop.set()
-
-    async def listen(self):
-        while not self._stop.is_set():
-            try:
-                yield await asyncio.wait_for(self._queue.get(), timeout=0.05)
-            except asyncio.TimeoutError:
-                continue
-
-    async def send(self, event: StreamEvent) -> None:
-        self._sent.append(event)
+    async def stream(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        options: dict[str, Any] | None = None,
+    ) -> AsyncIterator[LlmChunk]:
+        idx = min(self.calls, len(self.call_texts) - 1)
+        self.calls += 1
+        for ch in self.call_texts[idx]:
+            yield LlmChunk(delta_text=ch)
+            await asyncio.sleep(0.02)
+        yield LlmChunk(finish_reason="stop")
 
 
-def build(tmp: Path):
-    ws = tmp / "ws"; ws.mkdir(parents=True, exist_ok=True)
-    mem = tmp / "mem"; mem.mkdir(exist_ok=True)
-    skills = tmp / "skills"; skills.mkdir(exist_ok=True)
-    skill_service = SkillService(skills)
-    tools = ToolRegistry([
-        BashTool(BashRunner(), ws),
-        SkillLoadTool(skill_service),
-        WaitIoTool(),
-        ReadToolResultBudgetTool(),
-    ])
-    mem_store = FsMemoryStore(mem)
-    ck = JsonlCheckpointStore(mem / "default" / "checkpoint.jsonl")
-    compression = CompressionService(
-        budget_tool=tools.get("read_tool_result_budget"),
-        llm=None,  # type: ignore[arg-type]
-    )
-    return tools, mem_store, ck, skill_service, compression
+def _msg(text: str) -> InboundEvent:
+    return InboundEvent(session_key="default", kind="message", text=text, source="t")
 
 
-async def _wait_for(predicate, timeout: float = 3.0, interval: float = 0.05) -> bool:
-    """轮询等到 predicate 为真。"""
-    elapsed = 0.0
-    while elapsed < timeout:
-        if predicate():
+def _intr() -> InboundEvent:
+    return InboundEvent(session_key="default", kind="interrupt", text="", source="t")
+
+
+def _drain_output(out_q: asyncio.Queue[StreamEvent]) -> list[StreamEvent]:
+    out: list[StreamEvent] = []
+    while True:
+        try:
+            out.append(out_q.get_nowait())
+        except asyncio.QueueEmpty:
+            return out
+
+
+async def _pump_until(out_q: asyncio.Queue[StreamEvent], pred, timeout: float = 3.0) -> bool:
+    loop = asyncio.get_event_loop()
+    deadline = loop.time() + timeout
+    events: list[StreamEvent] = []
+    while loop.time() < deadline:
+        try:
+            ev = await asyncio.wait_for(out_q.get(), timeout=0.1)
+        except asyncio.TimeoutError:
+            continue
+        events.append(ev)
+        if pred(events):
             return True
-        await asyncio.sleep(interval)
-        elapsed += interval
     return False
 
 
-async def test_interrupt_cancels_step() -> None:
-    """react 进行中发 interrupt：token stream 必须中止，下一轮 user 必须被接收。"""
-    tmp = Path("/tmp/test_interrupt_basic")
-    shutil.rmtree(tmp, ignore_errors=True); tmp.mkdir()
-    tools, mem, ck, ss, comp = build(tmp)
-    loop = LoopEngine(
-        session_key="default", system_prompt="t",
-        llm=SlowLLM(), tools=tools, compression=comp,
-        memory=mem, checkpoint=ck, skill_service=ss,
+def make_env(tmp_path: Path, llm: LLMProxy):
+    ckpt = JsonlCheckpointStore(tmp_path / "default" / "checkpoint.jsonl")
+    engine = LoopEngine(
+        session_key="default",
+        system_prompt="sys",
+        llm=llm,
+        tools=ToolRegistry([]),
+        compression=CompressionService(budget_tool=None, llm=None),  # type: ignore[arg-type]
+        memory=FsMemoryStore(tmp_path / "mem"),
+        checkpoint=ckpt,
+        max_steps=5,
+        path_vars={"MONOX_MEMORY_DIR": str(tmp_path / "mem")},
     )
-    ch = StubChannel()
-    iq: asyncio.Queue[InboundEvent] = asyncio.Queue()
-    oq: asyncio.Queue[StreamEvent] = asyncio.Queue()
-    gw = Gateway(ch, loop_input=iq, loop_output=oq)
-    gw_task = asyncio.create_task(gw.run())
-    loop_task = asyncio.create_task(loop.run(iq, oq))
+    in_q: asyncio.Queue[InboundEvent] = asyncio.Queue()
+    out_q: asyncio.Queue[StreamEvent] = asyncio.Queue()
+    return engine, in_q, out_q, ckpt
 
+
+async def run_engine(engine: LoopEngine, in_q: asyncio.Queue, out_q: asyncio.Queue):
+    task = asyncio.create_task(engine.run(in_q, out_q))
+    await asyncio.sleep(0.01)
+    return task
+
+
+async def kill(task: asyncio.Task) -> None:
+    task.cancel()
     try:
-        # 1) 第一轮
-        await ch._queue.put(InboundEvent(
-            session_key="default", kind="message", text="first turn"))
-        assert await _wait_for(lambda: any(getattr(e, "text", "") == "t0 " for e in ch._sent), 3.0), \
-            "LLM never produced first token"
-
-        # 2) interrupt
-        await ch._queue.put(InboundEvent(
-            session_key="default", kind="interrupt", text=""))
-        assert await _wait_for(
-            lambda: any(isinstance(e, StatusChange) and e.state == "idle" for e in ch._sent),
-            3.0,
-        ), "idle status never appeared after interrupt"
-
-        # 3) 计数：cancel 之后不应继续吐完剩余 ~29 个 token
-        token_after_idle = sum(
-            1 for e in ch._sent
-            if hasattr(e, "text") and e.text.startswith("t")
-        )
-        # interrupt 在 t0 之后不久发出 → token 数应远小于 30
-        assert token_after_idle < 15, f"stream continued after interrupt: {token_after_idle} tokens"
-
-        # 4) 之后 user 应能起新 react（messages 不残留）
-        # 给 pumper / _select 一点时间收尾
-        await asyncio.sleep(0.2)
-        await ch._queue.put(InboundEvent(
-            session_key="default", kind="message", text="second turn"))
-        await asyncio.sleep(0.5)
-        assert await _wait_for(
-            lambda: any(getattr(e, "text", "") == "second turn" for e in ch._sent),
-            3.0,
-        ), "second turn never reached LLM"
-        # 等 final（第二轮 react 完成）
-        await _wait_for(lambda: any(isinstance(e, FinalMessage) for e in ch._sent), 3.0)
-
-        # messages：被打断的 step 不留 assistant；第二次 react 留 user + assistant
-        user_count = sum(1 for m in loop._messages if m.get("role") == "user")
-        assert user_count == 2, f"expected 2 user msgs, got {user_count}: {loop._messages}"
-
-        print("test_interrupt_cancels_step PASSED ✓")
-    finally:
-        for t in (gw_task, loop_task):
-            t.cancel()
-            try: await t
-            except: pass
+        await task
+    except (asyncio.CancelledError, Exception):
+        pass
 
 
-async def test_interrupt_before_react_does_nothing_harmful() -> None:
-    """idle 时收到 interrupt：不报错，user 仍能被 react。"""
-    tmp = Path("/tmp/test_interrupt_idle")
-    shutil.rmtree(tmp, ignore_errors=True); tmp.mkdir()
-    tools, mem, ck, ss, comp = build(tmp)
+_THINKING = lambda evs: any(isinstance(e, StatusChange) and e.state == "thinking" for e in evs)
+_IDLE = lambda evs: any(isinstance(e, StatusChange) and e.state == "idle" for e in evs)
 
-    class ShortLLM(LLMProxy):
-        async def stream(self, messages, tools=None, options=None):
-            yield LlmChunk(delta_text="ok", finish_reason="stop")
 
-    loop = LoopEngine(
-        session_key="default", system_prompt="t",
-        llm=ShortLLM(), tools=tools, compression=comp,
-        memory=mem, checkpoint=ck, skill_service=ss,
+async def test_interrupt_during_stream(tmp_path):
+    engine, in_q, out_q, _ckpt = make_env(tmp_path, _StreamingLLM(["hello world"]))
+    task = await run_engine(engine, in_q, out_q)
+
+    in_q.put_nowait(_msg("hi"))
+    assert await _pump_until(out_q, _THINKING), "react 未启动"
+
+    in_q.put_nowait(_intr())
+    assert await _pump_until(out_q, _IDLE), "中断后应回到 idle"
+    assert not any(isinstance(e, FinalMessage) for e in _drain_output(out_q)), \
+        "中断不得产出 FinalMessage"
+
+    roles = [m.get("role") for m in engine._messages]
+    assert roles == ["user"], f"回滚失败：{roles}"
+
+    await kill(task)
+
+
+async def test_interrupt_at_step_start_not_polluting_context(tmp_path):
+    llm = _StreamingLLM(["answer"])
+    engine, in_q, out_q, ckpt = make_env(tmp_path, llm)
+    task = await run_engine(engine, in_q, out_q)
+
+    in_q.put_nowait(_msg("q"))
+    in_q.put_nowait(_intr())
+    await _pump_until(out_q, _IDLE)
+
+    msgs = await ckpt.load_messages("default")
+    for m in msgs:
+        content = m.get("content") or ""
+        assert 'kind="interrupt"' not in content, f"interrupt 泄漏进上下文: {content!r}"
+
+    await kill(task)
+
+
+async def test_repeated_interrupts_collapse(tmp_path):
+    llm = _StreamingLLM(["long answer here", "ok"])
+    engine, in_q, out_q, _ckpt = make_env(tmp_path, llm)
+    task = await run_engine(engine, in_q, out_q)
+
+    in_q.put_nowait(_msg("go"))
+    assert await _pump_until(out_q, _THINKING)
+
+    for _ in range(3):
+        in_q.put_nowait(_intr())
+
+    ok = await _pump_until(
+        out_q,
+        lambda evs: sum(1 for e in evs if isinstance(e, StatusChange) and e.state == "idle") >= 1,
     )
-    ch = StubChannel()
-    iq: asyncio.Queue[InboundEvent] = asyncio.Queue()
-    oq: asyncio.Queue[StreamEvent] = asyncio.Queue()
-    gw = Gateway(ch, loop_input=iq, loop_output=oq)
-    gw_task = asyncio.create_task(gw.run())
-    loop_task = asyncio.create_task(loop.run(iq, oq))
+    assert ok
+    await asyncio.sleep(0.15)
+    _drain_output(out_q)
 
-    try:
-        await ch._queue.put(InboundEvent(
-            session_key="default", kind="interrupt", text=""))
-        await asyncio.sleep(0.3)
-        await ch._queue.put(InboundEvent(
-            session_key="default", kind="message", text="hi"))
-        assert await _wait_for(
-            lambda: any(getattr(e, "text", "") == "ok" for e in ch._sent),
-            3.0,
-        ), "normal message lost after stray interrupt"
-        # user + assistant = 2（interrupt 没污染 messages）
-        assert len(loop._messages) == 2
-        print("test_interrupt_before_react_does_nothing_harmful PASSED ✓")
-    finally:
-        for t in (gw_task, loop_task):
-            t.cancel()
-            try: await t
-            except: pass
+    # 核心断言：连发 interrupt 后引擎必须存活且可用
+    in_q.put_nowait(_msg("after"))
+    finals: list[FinalMessage] = []
+    ok = await _pump_until(
+        out_q,
+        lambda evs: (finals.extend(e for e in evs if isinstance(e, FinalMessage)) or bool(finals)),
+        timeout=5.0,
+    )
+    assert ok and finals[-1].text == "ok", "连发 interrupt 后引擎应保持可用"
+
+    await kill(task)
+
+
+async def test_message_after_interrupt_starts_new_turn(tmp_path):
+    llm = _StreamingLLM(["first-reply", "second-reply"])
+    engine, in_q, out_q, _ckpt = make_env(tmp_path, llm)
+    task = await run_engine(engine, in_q, out_q)
+
+    in_q.put_nowait(_msg("one"))
+    assert await _pump_until(out_q, _THINKING)
+    in_q.put_nowait(_intr())
+    assert await _pump_until(out_q, _IDLE)
+
+    in_q.put_nowait(_msg("two"))
+    finals: list[FinalMessage] = []
+
+    def grab_final(evs):
+        finals.extend(e for e in evs if isinstance(e, FinalMessage))
+        return bool(finals)
+
+    assert await _pump_until(out_q, grab_final, timeout=5.0), \
+        "新 message 应回到正常运行并产出 FinalMessage"
+    assert finals[-1].text == "second-reply"
+    assert llm.calls == 2
+
+    await kill(task)
+
+
+async def test_idle_interrupt_is_harmless(tmp_path):
+    llm = _StreamingLLM(["ok"])
+    engine, in_q, out_q, _ckpt = make_env(tmp_path, llm)
+    task = await run_engine(engine, in_q, out_q)
+
+    in_q.put_nowait(_intr())
+    assert await _pump_until(out_q, _IDLE)
+    assert not any(isinstance(e, FinalMessage) for e in _drain_output(out_q))
+
+    in_q.put_nowait(_msg("later"))
+    finals: list[FinalMessage] = []
+    ok = await _pump_until(
+        out_q,
+        lambda evs: (finals.extend(e for e in evs if isinstance(e, FinalMessage)) or bool(finals)),
+        timeout=5.0,
+    )
+    assert ok and finals[-1].text == "ok"
+
+    await kill(task)
+
+
+class _HangTool:
+    name = "bash"
+    schema = {
+        "type": "function",
+        "function": {
+            "name": "bash",
+            "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}},
+        },
+    }
+
+    async def execute(self, call_id: str, arguments: dict) -> Any:
+        from core.protocol import ToolResult
+
+        await asyncio.sleep(30)
+        return ToolResult(call_id=call_id, status="ok", stdout="", stderr="", exit_code=0)
+
+
+class _ToolCallThenTextLLM(LLMProxy):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def stream(self, messages, tools=None, options=None) -> AsyncIterator[LlmChunk]:
+        self.calls += 1
+        if self.calls == 1:
+            yield LlmChunk(
+                delta_tool_calls=(
+                    {"index": 0, "id": "c1", "type": "function",
+                     "function": {"name": "bash", "arguments": "{}"}},
+                ),
+                finish_reason="tool_calls",
+            )
+        else:
+            yield LlmChunk(delta_text="after-tool")
+            yield LlmChunk(finish_reason="stop")
+
+
+async def test_interrupt_during_tool_execution(tmp_path):
+    llm = _ToolCallThenTextLLM()
+    ck_dir = tmp_path / "default"
+    ck_dir.mkdir(parents=True, exist_ok=True)
+    engine = LoopEngine(
+        session_key="default",
+        system_prompt="sys",
+        llm=llm,
+        tools=ToolRegistry([_HangTool()]),
+        compression=CompressionService(budget_tool=None, llm=None),  # type: ignore[arg-type]
+        memory=FsMemoryStore(tmp_path / "mem"),
+        checkpoint=JsonlCheckpointStore(ck_dir / "checkpoint.jsonl"),
+        max_steps=5,
+        path_vars={"MONOX_MEMORY_DIR": str(tmp_path / "mem")},
+    )
+    in_q: asyncio.Queue[InboundEvent] = asyncio.Queue()
+    out_q: asyncio.Queue[StreamEvent] = asyncio.Queue()
+    task = await run_engine(engine, in_q, out_q)
+
+    in_q.put_nowait(_msg("run it"))
+    saw_tool = await _pump_until(
+        out_q,
+        lambda evs: any(type(e).__name__ in ("ToolStart", "ToolEnd") for e in evs),
+        timeout=5.0,
+    )
+    assert saw_tool, "未进入 tool 执行"
+
+    t0 = asyncio.get_event_loop().time()
+    in_q.put_nowait(_intr())
+    ok = await _pump_until(out_q, _IDLE, timeout=7.0)
+    elapsed = asyncio.get_event_loop().time() - t0
+
+    assert ok, "tool 执行中的 interrupt 应经由 cancel 路径打断"
+    assert elapsed < 6.5, f"应远小于 tool 的 30s 睡眠，实际 {elapsed:.1f}s"
+    assert not any(isinstance(e, FinalMessage) for e in _drain_output(out_q))
+
+    await kill(task)

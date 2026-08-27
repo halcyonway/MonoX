@@ -47,6 +47,9 @@ from core.skill_service import SkillService
 
 WAIT_IO_NAME = "wait_io"
 
+# _react 被中断时返回的哨兵 final_text；run() 据此走中断清理而不是 FinalMessage。
+_INTERRUPTED = "__interrupted__"
+
 
 class LoopEngine:
     def __init__(
@@ -76,6 +79,8 @@ class LoopEngine:
         self._max_steps = max_steps
         # 可观测性：可选的 trace 收集器；为 None 时整条 trace 路径不执行。
         self._traces = traces
+        # 当前请求使用的 provider 名（来自 user_input meta.model_provider）
+        self._model_provider: str | None = None
 
         self._messages: list[dict[str, Any]] = []
         self._step_idx = 0
@@ -91,75 +96,139 @@ class LoopEngine:
     ) -> None:
         await self._restore()
 
-        # 持续在后台 pump input_queue → 内部 sub_queue（保证 main loop 的 await 不会阻塞 react）
+        # 入站分流：interrupt 走独立队列（最高优先级，任何阶段非阻塞检查），
+        # 其余事件走 sub_queue。见 spec/REQUIREMENTS/interrupt.md。
         sub_queue: asyncio.Queue[InboundEvent] = asyncio.Queue()
+        interrupt_queue: asyncio.Queue[InboundEvent] = asyncio.Queue()
 
         async def pumper():
             while True:
                 ev = await input_queue.get()
-                await sub_queue.put(ev)
+                if ev.kind == "interrupt":
+                    await interrupt_queue.put(ev)
+                else:
+                    await sub_queue.put(ev)
 
         pump_task = asyncio.create_task(pumper())
+
+        async def finalize_aborted(status: str) -> None:
+            """中断/异常后的统一清理：回滚半截消息、关 trace、回 idle。"""
+            self._messages = self._msgs_before
+            self._step_idx -= 1
+            self._session_metric.drop_last()
+            if self._traces is not None and self._run_id is not None:
+                await self._traces.end_run(None, status=status)
+                self._run_id = None
+                self._current_turn_id = None
+            await output_queue.put(StatusChange(state="idle"))
+
+        def take_interrupt() -> InboundEvent | None:
+            """非阻塞取一条 interrupt；连发的余量一并吞掉（一波打断一次反馈）。"""
+            try:
+                first = interrupt_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                return None
+            while not interrupt_queue.empty():
+                interrupt_queue.get_nowait()
+            return first
+
+        async def handle_interrupt() -> None:
+            """step 跑着 → cancel 它；随后统一回 idle。"""
+            nonlocal step_task
+            if step_task is not None and not step_task.done():
+                self._msgs_before = list(self._messages)
+                step_task.cancel()
+                try:
+                    await asyncio.wait_for(step_task, timeout=5.0)
+                except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+                    pass
+            step_task = None
+            await output_queue.put(StatusChange(state="idle"))
+
+        async def _race_get(a: asyncio.Queue, b: asyncio.Queue, step_t: asyncio.Task | None):
+            """race 两条队列 + 可选 step task，interrupt 侧赢得抢占优先。
+
+            返回 ("msg", ev) | ("intr", ev) | ("done", None)。
+            注意 step 结果由调用方 step_task.result() 取——在 helper 内 .result() 会让
+            react 的异常在这里抛出，绕过调用方的 except 兜底。
+            输掉的 get task 一律取消（其数据未被消费，不丢失）。
+            """
+            t_a = asyncio.create_task(a.get())
+            t_b = asyncio.create_task(b.get())
+            wait_set = {t_a, t_b}
+            if step_t is not None:
+                wait_set.add(step_t)
+            done, _pending = await asyncio.wait(wait_set, return_when=asyncio.FIRST_COMPLETED)
+            for t in (t_a, t_b):
+                if t not in done:
+                    t.cancel()
+                    try:
+                        await t
+                    except asyncio.CancelledError:
+                        pass
+            # interrupt 赢得所有平局（最高优先级语义）
+            if t_b in done:
+                if step_t is not None and step_t.done():
+                    # 被打断前 step 恰好完成：静默收割结果/异常，避免 unretrieved 警告
+                    try:
+                        step_t.result()
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                return "intr", t_b.result()
+            if step_t is not None and step_t in done:
+                return "done", None
+            return "msg", t_a.result()
 
         # 当前 react step 的 task；interrupt 会取消它。
         step_task: asyncio.Task[str] | None = None
 
-        async def next_input_or_done() -> tuple[InboundEvent | None, str | None]:
-            """等下一个 input 事件，或当前 step 完成。
-
-            返回 (input_event, final_text)；二者只有一个非 None。
-            """
-            nonlocal step_task
-            # 起一个 task 等 sub_queue
-            get_task = asyncio.create_task(sub_queue.get())
-            try:
-                if step_task is None:
-                    ev = await get_task
-                    return ev, None
-                # 同时等 input 和 step 哪个先到
-                done, pending = await asyncio.wait(
-                    {get_task, step_task},
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                if step_task in done:
-                    # react 完成；cancel 等 sub_queue 的 task
-                    get_task.cancel()
-                    try: await get_task
-                    except: pass
-                    final = step_task.result()
-                    return None, final
-                else:
-                    # input 先到；cancel step（仅当 step 已跑完；否则让它继续）
-                    ev = get_task.result()
-                    return ev, None
-            except asyncio.CancelledError:
-                if not get_task.done():
-                    get_task.cancel()
-                raise
-
         try:
             while True:
+                # C1：主循环每轮开头先扫一轮积压 interrupt
+                if take_interrupt() is not None:
+                    await handle_interrupt()
+                    continue
+
                 if step_task is None:
-                    ev = await sub_queue.get()
+                    kind, payload = await _race_get(sub_queue, interrupt_queue, None)
+                    if kind == "intr":
+                        await handle_interrupt()
+                        continue
+                    ev = payload
                 else:
-                    # react 跑着，等 interrupt 帧或 react 完成
-                    ev, final_text = await self._select(sub_queue, step_task)
-                    if ev is None:
-                        # react 完成
+                    # react 跑着：三方 race——sub_queue / interrupt 队列 / step 完成。
+                    # interrupt 侧赢平局，保证 tool 长执行、LLM 卡流都可被立刻打断。
+                    kind, payload = await _race_get(sub_queue, interrupt_queue, step_task)
+                    if kind == "intr":
+                        await handle_interrupt()
+                        continue
+                    if kind == "done":
                         try:
                             final_text = step_task.result()
                         except asyncio.CancelledError:
-                            self._messages = self._msgs_before
-                            self._step_idx -= 1
-                            self._session_metric.drop_last()
-                            # 可观测性：cancelled 路径关 run
-                            if self._traces is not None and self._run_id is not None:
-                                await self._traces.end_run(None, status="cancelled")
-                                self._run_id = None
-                                self._current_turn_id = None
-                            await output_queue.put(StatusChange(state="idle"))
+                            await finalize_aborted("cancelled")
                             step_task = None
                             continue
+                        except Exception as exc:
+                            # LLM / 工具异常兜底：不能让异常杀死 run() 循环，
+                            # 否则 input_q 再无人消费 → 中断失效、UI 永远 thinking。
+                            _log.exception("react step failed: %r", exc)
+                            await output_queue.put(ErrorEvent(
+                                code="llm_error",
+                                msg=f"{type(exc).__name__}: {exc}",
+                                retryable=True,
+                            ))
+                            await finalize_aborted("error")
+                            step_task = None
+                            continue
+
+                        if final_text == _INTERRUPTED:
+                            # C2/C3 协作中止路径：_react 已消费触发的那条 interrupt，
+                            # 这里只做统一清理（连发余量已在 take_interrupt/_react 吞掉）。
+                            await finalize_aborted("cancelled")
+                            step_task = None
+                            continue
+
                         await output_queue.put(
                             FinalMessage(
                                 text=final_text,
@@ -174,35 +243,14 @@ class LoopEngine:
                             self._current_turn_id = None
                         step_task = None
                         continue
-
-                if ev.kind == "interrupt":
-                    # 真打断：取消正在跑的 step task，不污染 messages。
-                    if step_task is not None and not step_task.done():
-                        self._msgs_before = list(self._messages)
-                        step_task.cancel()
-                        try:
-                            await asyncio.wait_for(step_task, timeout=5.0)
-                        except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
-                            pass
-                    step_task = None
-                    await output_queue.put(StatusChange(state="idle"))
-                    # drain 余下 interrupt；非 interrupt 事件放回 sub_queue 队首
-                    first_non_interrupt: InboundEvent | None = None
-                    while not sub_queue.empty():
-                        try:
-                            nxt = sub_queue.get_nowait()
-                        except asyncio.QueueEmpty:
-                            break
-                        if nxt.kind == "interrupt":
-                            continue
-                        first_non_interrupt = nxt
-                        break
-                    if first_non_interrupt is not None:
-                        await sub_queue.put(first_non_interrupt)
-                    continue
+                    ev = payload  # kind == "msg"：step 跑着收到新消息，追加进上下文由本 step 聚合
 
                 user_msg = {"role": "user", "content": user_input_event_xml(ev)}
                 self._messages.append(user_msg)
+                # 提取 model_provider（来自 user_input meta），用于后续 stream() 调用
+                mp = ev.meta.get("model_provider") if ev.meta else None
+                if mp:
+                    self._model_provider = mp
                 # 持久化：用户消息到达是稳定边界，立刻 append
                 await self._checkpoint.append(
                     self._session_key,
@@ -215,7 +263,7 @@ class LoopEngine:
                 if self._traces is not None and self._run_id is None:
                     self._run_id = await self._traces.begin_run(ev.text)
                 step_task = asyncio.create_task(
-                    self._react(sub_queue, output_queue)
+                    self._react(sub_queue, interrupt_queue, output_queue)
                 )
         finally:
             pump_task.cancel()
@@ -267,6 +315,7 @@ class LoopEngine:
     async def _react(
         self,
         input_queue: asyncio.Queue[InboundEvent],
+        interrupt_queue: asyncio.Queue[InboundEvent],
         output_queue: asyncio.Queue[StreamEvent],
     ) -> str:
         final_text = ""
@@ -275,6 +324,12 @@ class LoopEngine:
             self._step_idx += 1
             step_metric = StepMetric(step_idx=self._step_idx)
             t0 = time.monotonic()
+
+            # C2：step 开头检查中断（在 drain 新消息之前，优先级最高）。
+            # 命中即消费掉这条 interrupt 并快速返回哨兵，清理统一由 run() 做。
+            if not interrupt_queue.empty():
+                interrupt_queue.get_nowait()
+                return _INTERRUPTED
 
             # 1) drain input_queue → aggregate 新 user 消息
             for ev in _drain(input_queue):
@@ -353,7 +408,13 @@ class LoopEngine:
                 )
             )
             try:
-                async for chunk in self._llm.stream(messages, tools=tool_schemas):
+                opts = {"model_provider": self._model_provider} if self._model_provider else None
+                async for chunk in self._llm.stream(messages, tools=tool_schemas, options=opts):
+                    # C3：流式消费循环内协作检查中断——毫秒级响应，不依赖外部 cancel。
+                    # 已发出的 token 由 run() 的回滚 + idle 兜底（与 cancel 路径一致）。
+                    if not interrupt_queue.empty():
+                        interrupt_queue.get_nowait()
+                        return _INTERRUPTED
                     if chunk.delta_text:
                         full_text += chunk.delta_text
                         await output_queue.put(TokenChunk(text=chunk.delta_text))
@@ -411,6 +472,7 @@ class LoopEngine:
                     metrics=step_metric.snapshot(),
                     trace_id=self._run_id,
                     turn_id=self._current_turn_id,
+                    model=_llm_model(self._llm),
                 )
             )
 
@@ -462,6 +524,9 @@ class LoopEngine:
                 for ev in pending:
                     msg = {"role": "user", "content": user_input_event_xml(ev)}
                     self._messages.append(msg)
+                    mp = ev.meta.get("model_provider") if ev.meta else None
+                    if mp:
+                        self._model_provider = mp
                     await self._checkpoint.append(
                         self._session_key,
                         {"kind": "msg", **msg},
@@ -627,14 +692,21 @@ def _safe_json(raw: Any) -> dict[str, Any]:
 
 
 def _llm_model(llm: Any) -> str:
-    """best-effort 从 LLMProxy 拿 model 名（不在 Protocol 里，做 duck-typing）。"""
-    # 优先：cfg.model（OpenAIStreamProxy 走这里）
+    """best-effort 从 LLMProxy 拿"上次 stream 用的真实 model"。
+
+    优先取 LlmProxy._last_model：那是解析 provider 后真正发给厂家 API 的字符串
+    （可能与 cfg.model 不同——cfg.model 是"人类可读名"）。
+
+    退路：cfg.model → llm.model → "unknown"。
+    """
+    m = getattr(llm, "_last_model", None)
+    if isinstance(m, str) and m:
+        return m
     cfg = getattr(llm, "_cfg", None)
     if cfg is not None:
         m = getattr(cfg, "model", None)
         if isinstance(m, str) and m:
             return m
-    # 退路：直接的 model 属性（测试 / 自定义 proxy）
     m = getattr(llm, "model", None)
     if isinstance(m, str) and m:
         return m
