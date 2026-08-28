@@ -33,6 +33,7 @@ from core.protocol import (
     StreamEvent,
     TokenChunk,
 )
+from core.protocol.wire_frames import FrameType
 
 
 @dataclass
@@ -79,6 +80,46 @@ def _build_card(content: str, state_label: str = "") -> dict[str, Any]:
     }
 
 
+_STATUS_LABEL = {
+    "running": "🚀 running",
+    "completed": "✅ completed",
+    "failed": "❌ failed",
+    "cancelled": "🚫 cancelled",
+    "timed_out": "⏰ timed out",
+    "interrupted": "⚠️ interrupted",
+}
+
+
+def _build_async_task_card(
+    d: dict[str, Any], *, final: bool = False, template: str = "blue"
+) -> dict[str, Any]:
+    """async task 卡片：created 时 running 态，status 时终态回写。"""
+    status = d.get("status", "running")
+    label = _STATUS_LABEL.get(status, status)
+    header = {
+        "title": {"tag": "plain_text", "content": f"MonoX Task · {d.get('task_id', '?')}"},
+        "template": template if final else "grey",
+    }
+    elements: list[dict[str, Any]] = [
+        {"tag": "markdown", "content": f"**{d.get('kind', 'subagent')}** — {d.get('description', '')}"},
+    ]
+    if final:
+        detail = d.get("final_text") or d.get("error") or ""
+        if detail:
+            preview = detail[:1500]
+            elements.append({"tag": "hr"})
+            elements.append({"tag": "markdown", "content": preview})
+        dur = d.get("duration_sec")
+        note = f"{label}" + (f" · {dur:.0f}s" if isinstance(dur, (int, float)) else "")
+        if d.get("cancel_reason"):
+            note += f" · {d['cancel_reason']}"
+    else:
+        note = label
+    elements.append({"tag": "hr"})
+    elements.append({"tag": "note", "elements": [{"tag": "plain_text", "content": note}]})
+    return {"config": {"wide_screen_mode": True}, "header": header, "elements": elements}
+
+
 class FeishuChannel:
     def __init__(
         self,
@@ -99,6 +140,8 @@ class FeishuChannel:
         self._last_chat_id: str | None = None
         # 卡片状态：session_key → CardState
         self._card_by_session: dict[str, _CardState] = {}
+        # async task 卡片：task_id → message_id（created 发卡，status 补终态）
+        self._async_card_by_task: dict[str, str] = {}
         # 消息 ID 去重（飞书可能重试）
         self._seen_msg_ids: set[str] = set()
         self._lock = asyncio.Lock()
@@ -281,6 +324,40 @@ class FeishuChannel:
             text = f"❌ {event.msg}"
             await self._patch_card(chat_id, open_id, text, True)
             return
+
+    async def handle_raw_frame(self, frame: dict) -> None:
+        """async_task_* 帧 → 卡片（最小化：created 发卡 + status 补终态）。
+
+        中间 event 不刷——飞书 patch 卡片有 API 频控，流式更新会限流；
+        终态（completed / failed / cancelled / timed_out）一次性回写。
+        """
+        ftype = frame.get("type")
+        if ftype == FrameType.ASYNC_TASK_CREATED:
+            d = frame.get("data") or {}
+            card = _build_async_task_card(d)
+            open_id = self._resolve_open_id()
+            if not open_id:
+                return
+            msg_id = await self._create_card_message(open_id, card)
+            if msg_id:
+                async with self._lock:
+                    self._async_card_by_task[d.get("task_id", "?")] = msg_id
+        elif ftype == FrameType.ASYNC_TASK_STATUS:
+            d = frame.get("data") or {}
+            async with self._lock:
+                msg_id = self._async_card_by_task.pop(d.get("task_id", "?"), None)
+            if not msg_id:
+                return
+            template = "blue" if d.get("status") == "completed" else "red" if d.get("status") == "failed" else "grey"
+            card = _build_async_task_card(d, final=True, template=template)
+            try:
+                await self._patch_card_message(msg_id, card)
+            except Exception:
+                pass
+
+    def _resolve_open_id(self) -> str:
+        chat_id = self._last_chat_id or self._pending_session_key or self._session_key
+        return self._open_id_by_chat.get(chat_id, "")
 
     async def _send_thinking_card(self, open_id: str, session_key: str) -> None:
         """发出空白/思考中卡片，并记住 message_id。"""

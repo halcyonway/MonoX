@@ -25,6 +25,7 @@ import asyncio
 import json
 import time
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 
 from textual.app import App, Binding
 from textual.containers import VerticalScroll
@@ -45,6 +46,7 @@ from core.protocol import (
     MetricChunk,
     Card,
 )
+from core.protocol.wire_frames import FrameType
 
 
 _MAX_TOOL_OUTPUT_CHARS = 2000
@@ -453,6 +455,12 @@ class ChatApp(App):
             self._scroll_to_bottom()
             return
 
+        if isinstance(ev, _RawTaskLine):
+            # async task 折叠行（handle_raw_frame 产出）；非 StreamEvent，_out_q 借道
+            history.mount(Static(ev.text, classes="task-line"))
+            self._scroll_to_bottom()
+            return
+
     def _scroll_to_bottom(self) -> None:
         try:
             self.query_one("#history").scroll_end(animate=False)
@@ -481,6 +489,8 @@ class TextualChannel:
 
         self._out_q: asyncio.Queue[StreamEvent] = asyncio.Queue()
         self._in_q: asyncio.Queue[InboundEvent] = asyncio.Queue()
+        # 原始上行帧（/cancel → async_task_cancel）；_runtime.pump_raw_inbound 消费
+        self.raw_outbound: asyncio.Queue[dict] = asyncio.Queue()
         self._stop = asyncio.Event()
 
         self._app: ChatApp | None = None
@@ -515,6 +525,13 @@ class TextualChannel:
         # non-blocking：Gateway pump_outbound 在等 send 返回
         self._out_q.put_nowait(event)
 
+    async def handle_raw_frame(self, frame: dict) -> None:
+        """async_task_* 帧 → 折叠行进 history（完整流看 MonoDesk）。"""
+        line = _fmt_task_frame(frame)
+        if line is not None and self._app is not None:
+            # 同一 event loop，借 _out_q 通道给 ChatApp 渲染
+            self._out_q.put_nowait(_RawTaskLine(line))  # type: ignore[arg-type]
+
     # ---- App 调用 ----
 
     def submit_user_input(self, text: str) -> None:
@@ -525,6 +542,17 @@ class TextualChannel:
             self._stop.set()
             if self._app and not self._app._exited:
                 self._app.call_later(self._app.exit)
+            return
+        if text.startswith("/cancel "):
+            task_id = text[len("/cancel "):].strip()
+            if task_id:
+                self.raw_outbound.put_nowait({
+                    "v": 1,
+                    "type": FrameType.ASYNC_TASK_CANCEL,
+                    "seq": 0,
+                    "ts": time.time(),
+                    "data": {"task_id": task_id, "reason": "user"},
+                })
             return
         self._in_q.put_nowait(
             InboundEvent(
@@ -539,6 +567,43 @@ class TextualChannel:
 
 
 # =================== helpers ===================
+
+
+@dataclass
+class _RawTaskLine:
+    """async task 折叠行（非 StreamEvent，_out_q 借道给 ChatApp 渲染）。"""
+
+    text: str
+
+
+def _fmt_task_frame(frame: dict) -> str | None:
+    """async_task_* 帧 → 折叠文本；无需展示的帧返回 None。"""
+    ftype = frame.get("type")
+    d = frame.get("data") or {}
+    tid = d.get("task_id", "?")
+    if ftype == FrameType.ASYNC_TASK_CREATED:
+        return f"[task {tid}] {d.get('kind', 'subagent')} started: \"{d.get('description', '')}\""
+    if ftype == FrameType.ASYNC_TASK_EVENT:
+        inner = d.get("event") or {}
+        if inner.get("type") == "tool_end":
+            ed = inner.get("data") or {}
+            result = ed.get("result") or {}
+            return f"[task {tid}]   {ed.get('name', '?')} · {ed.get('latency_ms', 0)}ms · exit {result.get('exit_code', '?')}"
+        if inner.get("type") == "error":
+            return f"[task {tid}]   error: {(inner.get('data') or {}).get('msg', '?')}"
+        return None
+    if ftype == FrameType.ASYNC_TASK_STATUS:
+        status = d.get("status", "?")
+        dur = d.get("duration_sec") or 0.0
+        line = f"[task {tid}] {status} in {dur:.0f}s"
+        if status == "failed" and d.get("error"):
+            line += f" — {d['error']}"
+        elif status in ("cancelled", "timed_out") and d.get("cancel_reason"):
+            line += f" ({d['cancel_reason']})"
+        elif status == "completed" and d.get("final_text"):
+            line += f" — {d['final_text'].replace(chr(10), ' ')[:200]}"
+        return line
+    return None
 
 
 def _fmt_args(args: dict) -> str:

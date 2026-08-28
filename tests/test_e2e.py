@@ -37,6 +37,16 @@ from core.protocol import (
 from core.sandbox import BashRunner
 from core.skill_service import SkillService
 
+# memory 功能后 assemble_messages 的 memory_section 需要 path_vars（run.py 装配时提供）
+_PATH_VARS = {
+    "MONOX_HOME": "/tmp",
+    "MONOX_WORKSPACE_DIR": "/tmp/ws",
+    "MONOX_MEMORY_DIR": "/tmp/mem",
+    "MONOX_SKILLS_DIR": "/tmp/skills",
+    "MONOX_TMP_DIR": "/tmp/tmp",
+}
+
+
 
 class MockLLM(LLMProxy):
     def __init__(self, scripts: list[list[LlmChunk]], step_delay: float = 0.0) -> None:
@@ -111,7 +121,7 @@ async def run_pipeline(tmp: Path, llm: MockLLM, events: list[InboundEvent]) -> M
     loop = LoopEngine(
         session_key="default", system_prompt="test",
         llm=llm, tools=tools, compression=make_compression(tools, llm, mem_store),
-        memory=mem_store, checkpoint=ck, skill_service=skill_service,
+        memory=mem_store, checkpoint=ck, skill_service=skill_service, path_vars=_PATH_VARS,
     )
     ch = MockChannel(events)
     iq: asyncio.Queue[InboundEvent] = asyncio.Queue()
@@ -190,7 +200,7 @@ async def test_queue_aggregate_continues_react() -> None:
     loop = LoopEngine(
         session_key="default", system_prompt="test",
         llm=llm, tools=tools, compression=make_compression(tools, llm, mem_store),
-        memory=mem_store, checkpoint=ck, skill_service=skill_service,
+        memory=mem_store, checkpoint=ck, skill_service=skill_service, path_vars=_PATH_VARS,
     )
     ch = MockChannel([InboundEvent(session_key="default", kind="message", text="first")])
     iq: asyncio.Queue[InboundEvent] = asyncio.Queue()
@@ -250,7 +260,7 @@ async def test_chat_only_persists_across_restart() -> None:
     loop = LoopEngine(
         session_key="default", system_prompt="test",
         llm=capturing_llm, tools=tools, compression=make_compression(tools, capturing_llm, mem_store),
-        memory=mem_store, checkpoint=ck, skill_service=skill_service,
+        memory=mem_store, checkpoint=ck, skill_service=skill_service, path_vars=_PATH_VARS,
     )
     ch2 = MockChannel([InboundEvent(session_key="default", kind="message", text="again")])
     iq: asyncio.Queue[InboundEvent] = asyncio.Queue()
@@ -344,7 +354,7 @@ async def test_l2_compression_folds_early_turns() -> None:
     loop = LoopEngine(
         session_key="default", system_prompt="test",
         llm=llm, tools=tools, compression=compression,
-        memory=mem_store, checkpoint=ck, skill_service=skill_service,
+        memory=mem_store, checkpoint=ck, skill_service=skill_service, path_vars=_PATH_VARS,
     )
     ch = MockChannel([])
     iq: asyncio.Queue[InboundEvent] = asyncio.Queue()

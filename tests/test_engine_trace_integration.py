@@ -14,6 +14,16 @@ from core.memory import FsMemoryStore
 from core.observability import JsonlTraceStore, TraceCollector
 from core.protocol import InboundEvent, LlmChunk, LLMProxy
 
+# memory 功能后 assemble_messages 的 memory_section 需要 path_vars（run.py 装配时提供）
+_PATH_VARS = {
+    "MONOX_HOME": "/tmp",
+    "MONOX_WORKSPACE_DIR": "/tmp/ws",
+    "MONOX_MEMORY_DIR": "/tmp/mem",
+    "MONOX_SKILLS_DIR": "/tmp/skills",
+    "MONOX_TMP_DIR": "/tmp/tmp",
+}
+
+
 
 class _MockLLM(LLMProxy):
     """最小 mock：一次 stream 调用，yield 完整 text，无 tool_call。"""
@@ -90,6 +100,7 @@ def _make_engine(
         compression=compression,
         memory=mem,
         checkpoint=ck,
+        path_vars=_PATH_VARS,
                 max_steps=3,
         traces=traces,
     )
@@ -245,7 +256,7 @@ async def test_metric_carry_trace_id_with_tool_call(tmp_path: Path):
     engine = LoopEngine(
         session_key="default", system_prompt="sys", llm=mock,
         tools=ToolRegistry([WaitIoTool()]),
-        compression=compression, memory=mem, checkpoint=ck,
+        compression=compression, memory=mem, checkpoint=ck, path_vars=_PATH_VARS,
         max_steps=3, traces=collector,
     )
     in_q: asyncio.Queue = asyncio.Queue()

@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import websockets
@@ -50,9 +51,17 @@ class RuntimeWSClient:
         }
         self._out_q: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self._in_q: asyncio.Queue[StreamEvent] = asyncio.Queue()
+        # 原始帧旁路：async_task_* 等 wire 层专用帧不进 StreamEvent（frame_to_stream_event
+        # 返回 None 会被丢）——想要它们的 channel 注入 handler，每条下行帧先喂它
+        self._raw_handler: Callable[[dict[str, Any]], Awaitable[None]] | None = None
         self._ws: ClientConnection | None = None
         self._connected = asyncio.Event()
         self._stop = asyncio.Event()
+
+    def set_raw_frame_handler(
+        self, handler: Callable[[dict[str, Any]], Awaitable[None]]
+    ) -> None:
+        self._raw_handler = handler
 
     async def send(self, frame: dict[str, Any]) -> None:
         await self._out_q.put(frame)
@@ -106,6 +115,8 @@ class RuntimeWSClient:
                 if isinstance(raw, (bytes, bytearray)):
                     raw = raw.decode("utf-8", errors="replace")
                 payload = decode(raw)
+                if self._raw_handler is not None and isinstance(payload, dict):
+                    await self._raw_handler(payload)
                 ev = frame_to_stream_event(payload)
                 if ev is not None:
                     await self._in_q.put(ev)

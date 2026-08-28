@@ -1,12 +1,18 @@
 """MonoX Runtime ↔ Gateway (↔ desktop client) WebSocket 帧格式 v1。
 
 帧信封：
-    {"v": 1, "type": <one_of_13>, "seq": <int>, "ts": <float>, "data": <object>}
+    {"v": 1, "type": <one_of_21>, "seq": <int>, "ts": <float>, "data": <object>}
 
-13 个 `type` 字符串：
+21 个 `type` 字符串：
 - 出站（Runtime → Gateway）：hello, status, token, reasoning, tool_pending, tool_start,
-                                tool_end, metric, final, card, error
-- 入站（Gateway → Runtime）：user_input, command, interrupt
+                                tool_end, metric, final, card, error,
+                                async_task_created, async_task_event, async_task_status,
+                                async_task_list, async_task_snapshot
+- 入站（Gateway → Runtime）：user_input, command, interrupt,
+                              async_task_cancel, async_task_list_query
+
+async_task_* 是 wire 层专用帧（不进 StreamEvent，先例 hello），承载异步任务
+（subagent 是经典场景）的状态 / 事件流，见 spec/requirements/async-task.md。
 
 本模块是 wire 协议的唯一事实来源；runtime server、gateway、desktop client
 三方共享。MonoDesk desktop client 端 spec 在另一个仓，但 wire 字段必须一字不差。
@@ -39,7 +45,7 @@ PROTOCOL_VERSION = 1
 
 
 class FrameType:
-    """14 个 wire frame type 字符串。集中定义避免魔法值。"""
+    """21 个 wire frame type 字符串。集中定义避免魔法值。"""
 
     HELLO = "hello"
     STATUS = "status"
@@ -55,6 +61,14 @@ class FrameType:
     USER_INPUT = "user_input"
     COMMAND = "command"
     INTERRUPT = "interrupt"
+    # async task（wire 层专用，见 spec/requirements/async-task.md）
+    ASYNC_TASK_CREATED = "async_task_created"
+    ASYNC_TASK_EVENT = "async_task_event"
+    ASYNC_TASK_STATUS = "async_task_status"
+    ASYNC_TASK_LIST = "async_task_list"
+    ASYNC_TASK_SNAPSHOT = "async_task_snapshot"
+    ASYNC_TASK_CANCEL = "async_task_cancel"
+    ASYNC_TASK_LIST_QUERY = "async_task_list_query"
 
 
 INBOUND_TYPES: frozenset[str] = frozenset({
@@ -75,6 +89,21 @@ OUTBOUND_TYPES: frozenset[str] = frozenset({
     FrameType.FINAL,
     FrameType.CARD,
     FrameType.ERROR,
+})
+
+# async task 出站帧（hello 同类：wire 层专用，不进 StreamEvent）
+ASYNC_TASK_OUTBOUND_TYPES: frozenset[str] = frozenset({
+    FrameType.ASYNC_TASK_CREATED,
+    FrameType.ASYNC_TASK_EVENT,
+    FrameType.ASYNC_TASK_STATUS,
+    FrameType.ASYNC_TASK_LIST,
+    FrameType.ASYNC_TASK_SNAPSHOT,
+})
+
+# async task 入站帧（不经 SessionManager，由 RuntimeServer 直路由 AsyncTaskManager）
+ASYNC_TASK_INBOUND_TYPES: frozenset[str] = frozenset({
+    FrameType.ASYNC_TASK_CANCEL,
+    FrameType.ASYNC_TASK_LIST_QUERY,
 })
 
 
@@ -213,7 +242,127 @@ def to_frame(event: StreamEvent, *, session_key: str, seq: int = 0) -> dict[str,
 
 
 # ----------------------------------------------------------------------
-# 入站：wire frame → InboundEvent / StreamEvent
+# 出站：async_task_* 帧（wire 层专用，不进 StreamEvent）
+# ----------------------------------------------------------------------
+
+def async_task_created_frame(
+    *,
+    session_key: str,
+    task_id: str,
+    kind: str,
+    description: str,
+    meta: dict[str, Any],
+    parent_session_key: str,
+    timeout_sec: float,
+    created_at: float,
+    seq: int = 0,
+) -> dict[str, Any]:
+    """fork 成功后立即发，让 MonoDesk Tasks 面板出现新行。session_key = parent_sk。"""
+    return _envelope(FrameType.ASYNC_TASK_CREATED, seq, {
+        "session_key": session_key,
+        "task_id": task_id,
+        "kind": kind,
+        "description": description,
+        "meta": meta,
+        "parent_session_key": parent_session_key,
+        "timeout_sec": timeout_sec,
+        "created_at": created_at,
+    })
+
+
+def async_task_event_frame(
+    *,
+    session_key: str,
+    task_id: str,
+    event: StreamEvent,
+    seq: int = 0,
+) -> dict[str, Any] | None:
+    """child SessionLoop 的 StreamEvent 转发。
+
+    内嵌完整 StreamEvent payload：{"type": <inner type>, "data": {...}}——复用
+    to_frame 的序列化，客户端用 frame_to_stream_event 同源逻辑反序列化内层。
+    """
+    inner = to_frame(event, session_key=session_key)
+    if inner is None:
+        return None
+    return _envelope(FrameType.ASYNC_TASK_EVENT, seq, {
+        "session_key": session_key,
+        "task_id": task_id,
+        "event": {"type": inner["type"], "data": inner["data"]},
+    })
+
+
+def async_task_status_frame(
+    *,
+    session_key: str,
+    task_id: str,
+    status: str,
+    finished_at: float,
+    duration_sec: float,
+    final_text: str | None = None,
+    error: str | None = None,
+    cancel_reason: str | None = None,
+    seq: int = 0,
+) -> dict[str, Any]:
+    """状态迁移（终态）。session_key = parent_sk。"""
+    return _envelope(FrameType.ASYNC_TASK_STATUS, seq, {
+        "session_key": session_key,
+        "task_id": task_id,
+        "status": status,
+        "finished_at": finished_at,
+        "duration_sec": duration_sec,
+        "final_text": final_text,
+        "error": error,
+        "cancel_reason": cancel_reason,
+    })
+
+
+def async_task_list_frame(
+    *, session_key: str, tasks: list[dict[str, Any]], seq: int = 0
+) -> dict[str, Any]:
+    """列表查询响应。tasks 是 AsyncTaskSummary dict 列表。"""
+    return _envelope(FrameType.ASYNC_TASK_LIST, seq, {
+        "session_key": session_key,
+        "tasks": tasks,
+    })
+
+
+def async_task_snapshot_frame(
+    *,
+    session_key: str,
+    task: dict[str, Any],
+    recent_events: list[dict[str, Any]],
+    seq: int = 0,
+) -> dict[str, Any]:
+    """详情查询响应：task 摘要 + 最近事件。"""
+    return _envelope(FrameType.ASYNC_TASK_SNAPSHOT, seq, {
+        "session_key": session_key,
+        "task": task,
+        "recent_events": recent_events,
+    })
+
+
+# ----------------------------------------------------------------------
+# 入站：wire frame → InboundEvent / StreamEvent / async_task 载荷
+# ----------------------------------------------------------------------
+
+def async_task_inbound_from_frame(payload: Any) -> tuple[str, dict[str, Any]] | None:
+    """解码 async_task_cancel / async_task_list_query → (type, data)。
+
+    这两类 inbound 不指向任何 session，不走 InboundEvent / SessionManager——
+    RuntimeServer 直路由给 AsyncTaskManager。其他 type 返回 None。
+    """
+    if not isinstance(payload, dict):
+        return None
+    mtype = payload.get("type")
+    if mtype not in ASYNC_TASK_INBOUND_TYPES:
+        return None
+    data = payload.get("data")
+    return (mtype, data if isinstance(data, dict) else {})
+
+
+# ----------------------------------------------------------------------
+# 入站：wire frame → InboundEvent（user_input / command / interrupt）
 # ----------------------------------------------------------------------
 
 def from_frame(

@@ -49,14 +49,46 @@ async def pump_outbound(channel: Channel, ws_client: RuntimeWSClient) -> None:
             _log.warning("outbound pump channel.send failed: %s", e)
 
 
+async def pump_raw_inbound(channel: Channel, ws_client: RuntimeWSClient) -> None:
+    """channel 的 raw_outbound 队列 → Runtime（原始帧直发，如 /cancel 的 async_task_cancel）。
+
+    channel 未提供 raw_outbound 队列时立即退出。
+    """
+    q: asyncio.Queue[dict[str, Any]] | None = getattr(channel, "raw_outbound", None)
+    if q is None:
+        return
+    while True:
+        frame = await q.get()
+        try:
+            await ws_client.send(frame)
+        except Exception as e:
+            _log.warning("raw inbound pump send failed: %s", e)
+            return
+
+
+def _wire_raw_frames(channel: Channel, ws_client: RuntimeWSClient) -> None:
+    """channel 可选 duck-type 扩展（不动 Channel 协议）：
+
+    - ``handle_raw_frame(frame)``：收原始下行帧——async_task_* 等 wire 层专用帧
+      不进 StreamEvent，channel 要看它们就实现这个方法
+    - ``raw_outbound: asyncio.Queue[dict]``：原始上行帧队列（如 /cancel 命令）
+    """
+    handler = getattr(channel, "handle_raw_frame", None)
+    if handler is not None:
+        ws_client.set_raw_frame_handler(handler)
+
+
 async def _run_once(channel: Channel, ws_client: RuntimeWSClient) -> None:
     """单次 main_loop：起 channel + ws client + 双 pump gather；任一异常退出。"""
     await channel.start()
+    _wire_raw_frames(channel, ws_client)
     ws_task = asyncio.create_task(ws_client.run(), name="ws-client")
+    raw_task = asyncio.create_task(pump_raw_inbound(channel, ws_client), name="raw-inbound")
     try:
         await asyncio.gather(
             pump_inbound(channel, ws_client),
             pump_outbound(channel, ws_client),
+            raw_task,
         )
     finally:
         await ws_client.stop()

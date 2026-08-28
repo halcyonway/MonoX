@@ -29,14 +29,16 @@ MonoX 当前 `LoopEngine` 是**单 turn 串行**模型：用户来一条消息 �
 - **新增 3 个内置 tool**：`core/loop/tools/{fork_task,poll_task,cancel_task}.py`。注册到 `run.py` 的 `ToolRegistry`。
 - **扩展 wire 协议**：在 `core/protocol/wire_frames.py` 加 7 个 frame type（5 outbound + 2 inbound）。`FrameType` 集中定义。
 - **扩展 `RuntimeServer`**：新增 `async_task_event` 全局 fan-out 路径（按 task_id 路由到所有 MonoDesk 客户端）；新增 2 个 inbound handler。
+- **`run.py` 装配微改**：`_register` 回调对 `async:` 前缀的 session_key 跳过 `register_outbound_queue`——保证 child output_q 只有 AsyncTaskBridge 一个消费者（见 §数据流「Subagent 执行」）；`finally` 里加 `async_task_mgr.shutdown()`。
+- **`core/config.py`**：新增 `[async_task]` 配置段（default/min/max timeout、max_steps）。
 - **MonoDesk**：新增 `Tasks` 侧栏页面（紧跟 Chat / Skills 之后）。
 
 ### 不改
 
-- **不改 `LoopEngine`**。AsyncTask 是 SessionLoop 的特殊用法，不动 engine 本身的 ReAct 状态机。
-- **不改 `SessionManager` 的 idle 销毁逻辑对 async task 应用**：async task 有自己的 deadline，不参与普通 session 的 idle sweep。
-- **不改 `wait_io` 语义**。AsyncTask 完成时通过 `AsyncTaskManager.notify_parent` 投 system event 到父 session 的 input_q，触发父 engine 已有的「新 InboundEvent 唤醒」路径（`LoopEngine.run` 第 141-175 行的 `await sub_queue.get()`）。
-- **不改 `core/protocol/events.py` 现有 dataclass 字段**。新增 2 个 outbound dataclass（`AsyncTaskEvent` / `AsyncTaskStatus` / `AsyncTaskCreated` / `AsyncTaskList` / `AsyncTaskSnapshot`）。
+- **不改 `LoopEngine` 的 ReAct 状态机**。AsyncTask 是 SessionLoop 的特殊用法；唯一的 engine 微改是 tool dispatch 处 set 一个 session-scoped contextvar（fork_task 定位 parent 用，见 §概念「parent_session_key 从哪来」），2 行，不碰状态机。
+- **`SessionManager` 的 lazy create / dispatch_inbound / checkpoint 恢复一律不改**；idle sweeper 加一条「react step 运行中不销毁」判断（见 §风险「idle sweep 与长任务」——对普通 session 同样生效，是修现存 bug，不是 async 特判）。
+- **不改 `wait_io` 语义**。AsyncTask 完成时通过 `AsyncTaskManager.notify_parent` 投 system event 到父 session 的 input_q，触发父 engine 已有的「新 InboundEvent 唤醒」路径（run() 主循环的 `_race_get` / sub_queue 分支：idle 时直接唤醒；turn 中在下一个 drain 点聚合进当前 turn，不抢占）。
+- **不改 `core/protocol/events.py`**。本需求的 5 个 wire dataclass（`AsyncTaskCreated` / `AsyncTaskEvent` / `AsyncTaskStatus` / `AsyncTaskList` / `AsyncTaskSnapshot`）是 wire 层专用，定义在 `wire_frames.py`，不进 `StreamEvent`（先例：hello）。
 - **不改 sandbox / LLM proxy / memory**。
 
 ### 遵循 Core 最小改动原则
@@ -53,21 +55,34 @@ MonoX 当前 `LoopEngine` 是**单 turn 串行**模型：用户来一条消息 �
 ```python
 @dataclass
 class AsyncTask:
-    task_id: str                # 32-hex, eg "t_4f9e..." 由 AsyncTaskManager 生成
-    kind: str                   # "subagent" / "bash_long" / ... (本期只实现 subagent)
+    task_id: str                # "t_" + uuid4().hex[:12]，如 "t_4f9ea1b2c3d4"；UI 截短展示
+    kind: str                   # "subagent"（SessionLoop）| "bash_long"（后台 shell 进程）
     description: str            # 第一句任务描述（UI / poll 用）
-    meta: dict[str, Any]        # 扩展 kv，agent fork 时填
     parent_session_key: str     # 谁 fork 的（主 session_key）
-    child_session_key: str      # "async:" + task_id（复用 SessionLoop）
-    status: Literal["pending","running","completed","failed","cancelled","timed_out"]
+    child_session_key: str      # "async:" + task_id（subagent 复用 SessionLoop；bash_long 仅作 task.json 目录名）
+    status: Literal["pending","running","completed","failed","cancelled","timed_out","interrupted"]
+                                # interrupted：Runtime 重启时对 status=running 的终态标记
+                                # （child loop 不复存在；poll_task 可见，历史输出在 checkpoint）
     created_at: float
-    started_at: float | None    # SessionLoop.start 实际启动时间
+    command: str | None         # bash_long 的 shell 命令（subagent 为 None）
+    meta: dict[str, Any]        # 扩展 kv，agent fork 时填
+    started_at: float | None    # 实际启动时间
     finished_at: float | None
     timeout_sec: float          # 默认 1800（30min）
-    final_text: str | None      # 子 agent 最后一句 final（completed 时填）
+    final_text: str | None      # completed 时的交付物（subagent final / bash stdout+stderr）
     error: str | None           # 失败原因
     cancel_reason: str | None   # agent / user / timeout
 ```
+
+### 两种 kind 的执行路径
+
+| | subagent | bash_long |
+|---|---|---|
+| 载体 | child SessionLoop（契约 + 首条消息） | `asyncio.create_subprocess_shell`，独立进程组（`start_new_session`） |
+| 输出 | FinalMessage → final_text | stdout/stderr → TokenChunk 进 ring buffer + wire，同时落 final_text |
+| cancel | 投 interrupt → engine 协作中断 → destroy | `killpg(SIGKILL)` 整组杀 → 等进程收尸 → _finish |
+| cwd | 与普通 session 相同 | `bash_cwd`（run.py 传 workspace，与 agent 的 bash tool 同 cwd） |
+| timeout | TimerHandle → cancel | 同左 |
 
 ### AsyncTaskManager
 
@@ -85,11 +100,48 @@ Runtime 进程内的单例（被 `run.py` 持有，跟 `SessionManager` 同层�
 
 - `session_key = "async:" + task_id`
 - `messages` 从空起步
-- 第一条 user message：`{"role": "user", "content": user_input_event_xml(<InboundEvent(kind="message", text=description, source="async_task", event_type="async-task-prompt", meta={...})>)}`
-- system prompt 跟普通 SessionLoop 一样（共享，不做 subagent 专用 prompt）
-- 复用 `JsonlCheckpointStore` 落到 `<state_root>/async/<task_id>/checkpoint.jsonl`——独立目录
+- 第一条 user message：`{"role": "user", "content": user_input_event_xml(<InboundEvent(kind="message", text=SUBAGENT_CONTRACT + description, source="async_task", event_type="async-task-prompt", meta={...})>)}`——`SUBAGENT_CONTRACT` 是子 agent 契约文本，见下节
+- system prompt 跟普通 SessionLoop 一样（共享，不做 subagent 专用 prompt）；子 agent 的行为约束全部由首条消息里的契约承担
+- 复用 `JsonlCheckpointStore` 落到 `<state_root>/<child_sk>/checkpoint.jsonl`（即 `async:<task_id>/`，既有 sk 派生规则，见 §存储的路径决策）
 - 工具集**完全继承**当前 ToolRegistry（agent 能 fork 时调的所有 tool，subagent 也能调；包括 fork_task 本身——**支持 subagent 嵌套**）
-- 不注册到 `RuntimeServer._outbound_qs`（不走 channel fan-out），由 `AsyncTaskManager` 自己消费 output_q
+- **单消费者保证**：`SessionManager._create` 会**无条件**调 `outbound_register`，child session 天然会被 RuntimeServer 注册一个 per-session consumer。因此 run.py 的 `_register` 回调必须对 `async:` 前缀 sk 跳过注册——否则 RuntimeServer consumer 跟 AsyncTaskBridge 抢同一个 Queue（asyncio.Queue 多消费者时每个事件只进一个消费者），child 流被随机劈半，且被抢走的一半因 child 无 `last_active_source` 而**静默丢弃**。改完之后 child 的 output_q **只**由 AsyncTaskBridge 消费
+
+### parent_session_key 从哪来（tool 协议没有 session 上下文）
+
+`Tool.execute(call_id, arguments)` 签名里没有调用方信息，ToolRegistry 又是全 session 共享的——fork_task 无法从参数推断「谁在调我」。注入 `lambda: cfg.session_key` 只在单 session 下碰巧正确：`chat-42` 里 fork 会把结果投到 `default`；subagent 里嵌套 fork 会把孙任务投到 `default` 而不是父任务——`notify_parent` 整条链路的正确性依赖这个字段。
+
+**决策：engine 在 tool dispatch 处 set 一个 session-scoped contextvar**（`core/loop/engine.py` 的 `await tool.execute(...)` 两侧，各 1 行）：
+
+```python
+# engine._react tool dispatch 处：
+_token = _current_session_key.set(self._session_key)
+try:
+    result = await tool.execute(call_id, args)
+finally:
+    _current_session_key.reset(_token)
+```
+
+fork_task 执行时用 `current_session_key()` 读 contextvar。这是「不改 LoopEngine」的唯一例外——不动状态机，只是把 engine 本来就有的信息（session_key）暴露给 tool 层。contextvar 天然跟随 asyncio 任务树：subagent 嵌套 fork 时拿到的是 child 自己的 sk，嵌套语义自动正确。
+
+### 子 agent 契约（首条消息文本）
+
+共享的交互式 system prompt 会教 agent「turn 结束调 wait_io」，而 bridge 的完成判据是「第一个 FinalMessage」——不写契约的话，agent 中途反问 / 干一半就 wait_io，父会收到 `completed` + 半成品。因此 fork 的首条消息文本固定为契约 + description：
+
+```
+You are running as an autonomous async task (subagent). Contract:
+- Work to completion in this single turn. Do NOT ask clarifying questions.
+- Do NOT call wait_io mid-task. Your final message IS the deliverable — make it a
+  self-contained summary of findings / changes.
+- You have the full tool registry, including fork_task for nested subagents.
+
+Task: <description>
+```
+
+契约文本是 `core/async_task.py` 里的常量（`SUBAGENT_CONTRACT`），单测断言它出现在首条消息里。
+外层由 engine 的 `user_input_event_xml` 包装成 `<event … event_type="async-task-prompt">`，
+契约里不嵌套 XML。`max_steps` 本期沿用 SessionManager 全局配置（child 不做 per-task 覆盖，
+避免 SessionManager 感知 async 语义）；subagent 步数普遍偏多，不够就全局调大。
+`[async_task]` 配置段只含 timeout 三项（default / min / max）。
 
 ---
 
@@ -216,15 +268,14 @@ child SessionLoop 触发 FinalMessage：
                 │
                 │  构造 InboundEvent:
                 │    session_key=parent_sk
-                │    kind="message"
-                │    text=(
-                │      f'<event type="async-task-result" source="async_task" '
-                │      f'task_id="{task_id}" status="completed">\n'
-                │      f'  <text>{summary}</text>\n'
-                │      f'</event>'
-                │    )
+                │    kind="system"            # runtime 内部通知，非用户输入
+                │    text="Async task <task_id> (subagent) completed in 47s.\n\nResult:\n<final_text，超 8000 字截断>"
+                │    source="async_task"
                 │    event_type="async-task-result"
-                │    meta={"task_id": task_id, "status": "completed"}
+                │    meta={"task_id": ..., "status": ..., "kind": ...}
+                │    （engine 侧 user_input_event_xml 包装后，LLM 看到的是
+                │      <event kind="system" channel="async_task" event_type="async-task-result">…</event>
+                │      ——结构化信息走 XML attrs + meta，不做嵌套 XML）
                 │
                 ▼
              SessionManager.dispatch_inbound(ev)
@@ -234,6 +285,10 @@ child SessionLoop 触发 FinalMessage：
 ```
 
 这就是复用了 wait_io 的「新事件唤醒」机制，不改 engine 一行代码。
+
+> **完成判据**：child 的第一个 FinalMessage。子 agent 契约（见 §概念）保证它只在交付时结束
+> turn；若 child 违约中途 wait_io，任务以「completed + 半成品 final」收场——接受该降级，
+> 不引入 turn 计数等复杂判据。
 
 ### Cancel / Timeout / 失败（三种入口同一出口）
 
@@ -247,8 +302,14 @@ timeout handle 触发                       ← 30min 兜底
        ▼
 AsyncTaskManager.cancel(task_id, reason)
        │
-       │  1) 找到 child_sk 对应的 SessionLoop.task
-       │  2) task.cancel() → 抛 CancelledError → 引擎清理（_messages/_step_idx 回滚，output_status=idle）
+       │  1) 向 child input_q 投 InboundEvent(kind="interrupt", source="async_task")
+       │     —— 复用 engine 现有协作中断：cancel 当前 step_task → 回滚 _messages/_step_idx
+       │     → StatusChange(idle)。
+       │     **不直接 task.cancel() SessionLoop.task**：cancel run() 不会传播到正在跑的
+       │     step_task（asyncio cancel 不跨任务传播），会留下孤儿 react 继续调 LLM / 写
+       │     checkpoint / 往无人消费的 output_q 堆事件；且绕过 engine 的统一清理路径。
+       │  2) 等 child 回 idle（bridge 收到 StatusChange(state="idle")，带 5s 超时兜底），
+       │     再 destroy child session——loop task 此时退出是安全的
        │  3) mark_done(task_id, status="cancelled"/"timed_out", cancel_reason=reason)
        │  4) notify_parent(...)：投 system-notify 事件到父 input_q，让父 agent 知道「task 已取消」
        │  5) 发 async_task_status wire 帧到所有 MonoDesk
@@ -258,14 +319,18 @@ AsyncTaskManager.cancel(task_id, reason)
 ### Poll（agent 主动查状态）
 
 ```
-poll_task(task_ids=["t_4f9e", "t_..."])
+poll_task()                                  ← 不带参数：全量列出（跨 parent，
+       │                                        与 MonoDesk Tasks 面板同口径；
+       │                                        任务列表是全局 UI 状态）
+poll_task(task_ids=["t_4f9e", "t_..."])      ← 指定任务
+poll_task(status=["running"])                ← 按状态过滤
        │
        ▼
-AsyncTaskManager.list(task_ids, ...)
+对每个 task_id 调 AsyncTaskManager.get(task_id)；无 task_ids 走 list(filter)
        │
-       │  对每个 task_id：
-       │    - 读 task.json → AsyncTaskSummary
-       │    - 读 events ring buffer 最近 K 条 → 摘要
+       │  对每个 task：
+       │    - 读内存 _tasks → AsyncTaskSummary（副本）
+       │    - running 的附带 events ring buffer 最近 K 条 → 摘要
        ▼
 返回 ToolResult(stdout=json.dumps(summaries, ...))
 
@@ -276,7 +341,7 @@ agent 想拿完整输出：用 poll_task 后再决定要不要 cancel 或者 for
 
 ## 协议：wire frame 扩展
 
-> 全部集中在 `core/protocol/wire_frames.py:FrameType`，保持「13 + 7 = 20 个 type 集中定义」的现有约定。
+> 全部集中在 `core/protocol/wire_frames.py:FrameType`，保持「14 + 7 = 21 个 type 集中定义」的现有约定（现有 14 个：10 个 StreamEvent 出站 + hello + user_input / command / interrupt 3 个入站）。
 
 ### Outbound 新增（5 个）
 
@@ -408,7 +473,7 @@ class AsyncTaskManager:
         *,
         session_manager: SessionManager,
         bridge_factory: Callable[[AsyncTask], Awaitable[AsyncTaskBridge]],
-        state_root: Path,                  # <state_root>/async/ 落 task.json
+        state_root: Path,                  # task.json 落 <state_root>/async:<task_id>/task.json
         on_event: Callable[[AsyncTaskEvent|AsyncTaskCreated|AsyncTaskStatus], Awaitable[None]],
         time_fn: Callable[[], float] = time.time,
         default_timeout_sec: float = DEFAULT_TIMEOUT_SEC,
@@ -428,9 +493,11 @@ class AsyncTaskManager:
     async def cancel(self, task_id: str, *, reason: str) -> bool:
         """cancel SessionLoop task + 标记 status='cancelled' + notify_parent。"""
 
-    def get(self, task_id: str) -> AsyncTask | None: ...
+    def get(self, task_id: str) -> AsyncTask | None:
+        """返回副本（`dataclasses.replace` / `copy`）——内部记录可变，不外借引用。"""
     def list(self, *, parent_session_key: str | None = None,
-             status: list[str] | None = None) -> list[AsyncTask]: ...
+             status: list[str] | None = None) -> list[AsyncTask]:
+        """同上，返回副本列表。"""
     def snapshot(self, task_id: str) -> tuple[AsyncTask, list[dict]] | None:
         """详情 + 最近 N 条 event。"""
 
@@ -472,23 +539,34 @@ completed  failed   cancelled    timed_out
            parent_sk input_q 投 async-task-result event
 ```
 
+重启恢复路径：启动扫描把 status=running → interrupted（不经上图迁移，直接改写 + 落盘 task.json）。
+
 ### 存储
 
 ```
 <state_root>/
 ├── default/checkpoint.jsonl              # 普通 session
 ├── chat-42/checkpoint.jsonl
-└── async/                                # AsyncTask 专属根（独立、不跟 session_key 混）
-    ├── t_4f9e_a1b2c3d4/
-    │   ├── checkpoint.jsonl              # child SessionLoop 复用 JsonlCheckpointStore
-    │   └── task.json                     # AsyncTask 完整字段
-    ├── t_5b0c_d5e6f7a8/
-    │   ├── checkpoint.jsonl
-    │   └── task.json
-    └── _index.json                       # 可选：内存里 dict[task_id, AsyncTask]，重启从 task.json 重建
+├── async:t_4f9ea1b2c3d4/                 # child 目录 = <state_root>/<child_sk>/（既有 sk 派生规则，无特判）
+│   ├── checkpoint.jsonl                  # child SessionLoop 复用 JsonlCheckpointStore
+│   └── task.json                         # AsyncTask 完整字段（与 checkpoint 同目录）
+└── async:t_5b0cd5e6f7a8/
+    ├── checkpoint.jsonl
+    └── task.json
 ```
 
-启动时扫描 `<state_root>/async/*/task.json` 重建 `_tasks` 索引；status=running 的标记为 interrupted（Runtime 重启会丢 child loop，下次 fork 拿不到旧 final；这是可接受降级——历史 final 在 checkpoint 里）。
+> **路径决策**：child_sk = `async:<task_id>`，`SessionManager._create` 的既有规则就是
+> `<state_root>/<sk>/checkpoint.jsonl`，直接沿用（目录名带冒号，macOS / Linux 合法；goal.md
+> 明确不兼容 Windows）。**不**为 `<state_root>/async/<task_id>/` 这种美观目录在 `_create` 里
+> 加特判。traces 同理落 `traces_root/async:<task_id>/`。
+>
+> **task.json 写入时机**：`start()` 成功后立即写（status=running）——只等 mark_done 才写的话，
+> running 中 crash 重启时连 task 都发现不了（checkpoint 在、task.json 不在）；之后每次状态
+> 迁移重写。
+
+启动时扫描 `<state_root>/async:*/task.json` 重建 `_tasks` 索引；status=running 的改标记为
+`interrupted`（Runtime 重启会丢 child loop，下次 fork 拿不到旧 final；可接受降级——历史输出在
+checkpoint 里，poll_task 能看到 interrupted 状态 + 已有摘要）。
 
 ---
 
@@ -551,8 +629,9 @@ class ForkTaskTool:
         },
     }
 
-    def __init__(self, async_task_manager: AsyncTaskManager,
-                 parent_session_key_provider: Callable[[], str]): ...
+    def __init__(self, async_task_manager: AsyncTaskManager): ...
+    # parent_session_key 不注入 provider——execute 时从 current_session_key()
+    # contextvar 读（见 §概念「parent_session_key 从哪来」，嵌套 fork 自动正确）
     async def execute(self, call_id, arguments) -> ToolResult: ...
 ```
 
@@ -563,6 +642,12 @@ class ForkTaskTool:
 ### run.py 注册
 
 ```python
+# 既有 _register 回调加前缀过滤（保证 child output_q 单消费者）：
+async def _register(sk: str, q: asyncio.Queue) -> None:
+    if sk.startswith("async:"):
+        return  # child session：不注册 RuntimeServer consumer，output_q 归 AsyncTaskBridge
+    await server.register_outbound_queue(sk, q)
+
 async_task_mgr = AsyncTaskManager(
     session_manager=session_mgr,
     bridge_factory=AsyncTaskBridge.factory(state_root),
@@ -576,10 +661,13 @@ tools = ToolRegistry([
     MultimodalUnderstandTool(),
     WaitIoTool(),
     budget_tool,
-    ForkTaskTool(async_task_mgr, lambda: cfg.session_key),
+    ForkTaskTool(async_task_mgr),
     PollTaskTool(async_task_mgr),
     CancelTaskTool(async_task_mgr),
 ])
+
+# 退出清理（main 的 finally，先于 session_mgr.stop()）：
+#   await async_task_mgr.shutdown()   # cancel 所有 running task + flush task.json
 ```
 
 ---
@@ -696,47 +784,57 @@ fork_task / cancel_task 工具块在 Chat 流里：
 
 ## 实施 Phase
 
-### Phase 1: 协议 + AsyncTaskManager 骨架（核心 + 协议）
+### Phase 1: 协议 + AsyncTaskManager 骨架（核心 + 协议）✅ 已完成（2026-08-28）
 
-- [ ] `core/async_task.py`：`AsyncTask` dataclass + `AsyncTaskManager` + `AsyncTaskBridge`
-- [ ] `core/loop/tools/fork_task.py` + `poll_task.py` + `cancel_task.py`
-- [ ] `core/protocol/wire_frames.py`：7 个新 FrameType + 编解码 + 单元测试
-- [ ] `core/runtime_server.py`：async_task_event 全局 fan-out + 2 个 inbound handler
-- [ ] `run.py`：装配 `AsyncTaskManager` + 3 个 tool + 配置段 `[async_task]`
-- [ ] 单测：`tests/test_async_task_manager.py`
-  - start 立即返回 task_id
-  - child SessionLoop 真的跑了（注入 mock llm 看 output_q 收到东西）
-  - cancel / timeout / 三种入口统一
+- [x] `core/async_task.py`：`AsyncTask` dataclass + `AsyncTaskManager` + `AsyncTaskBridge`（含 `SUBAGENT_CONTRACT` 常量）
+- [x] `core/loop/tools/fork_task.py` + `poll_task.py` + `cancel_task.py`
+- [x] `core/protocol/wire_frames.py`：7 个新 FrameType + 编解码 + 单元测试
+- [x] `core/runtime_server.py`：async_task_event 全局 fan-out + 2 个 inbound handler
+- [x] `core/loop/engine.py`：tool dispatch 处 set `_current_session_key` contextvar（2 行）
+- [x] `core/session_manager.py`：idle sweeper 跳过「react step 运行中」的 session
+- [x] `run.py`：装配 `AsyncTaskManager` + 3 个 tool + `_register` 前缀过滤 + `shutdown()` 接线 + 配置段 `[async_task]`
+- [x] 单测：`tests/test_async_task_manager.py`
+  - start 立即返回 task_id；task.json 在 start 时即落盘
+  - child SessionLoop 真的跑了（注入 mock llm 看 output_q 收到东西）；首条消息含 SUBAGENT_CONTRACT
+  - cancel / timeout / 三种入口统一；cancel 走 interrupt 路径，结束后无孤儿 step（mock llm 挂起 + cancel，断言无后续 LLM 调用、checkpoint 无中间态）
+  - 嵌套 fork：child 里 fork，孙任务 parent_session_key == child sk（contextvar 生效）
+  - idle sweeper：step 运行中 > idle_timeout 不销毁；真正空闲的照常销毁
   - notify_parent 投到 input_q（mock SessionManager 看 input_q 收到）
   - parent input_q 事件格式正确
 
-### Phase 2: terminal / feishu / textual channel adapter 适配（最小化）
+### Phase 2: terminal / feishu / textual channel adapter 适配（最小化）✅ 已完成（2026-08-28）
 
-- [ ] terminal adapter 加 5 个新 outbound handler（折叠打印）+ `/cancel <task_id>` command（→ 发 async_task_cancel inbound）
-- [ ] feishu adapter 加卡片渲染（用现有 card builder）
-- [ ] textual adapter 跟 terminal 同样折叠逻辑
+- [x] terminal adapter 加折叠打印（`handle_raw_frame`）+ `/cancel <task_id>` command（→ `raw_outbound` 队列 → async_task_cancel inbound 帧）
+- [x] feishu adapter 卡片渲染（created 发卡 + status 终态回写；中间事件不刷防频控）
+- [x] textual adapter 跟 terminal 同样折叠逻辑
+- [x] 基础设施：`RuntimeWSClient.set_raw_frame_handler`（原始帧旁路，Channel 协议本体不变）+ `_runtime.pump_raw_inbound`（duck-type `raw_outbound` 队列）
+- [x] 单测：terminal /cancel 帧构造 + 折叠打印（`tests/test_terminal_channel.py`）
 
-### Phase 3: MonoDesk UI
+### Phase 3: MonoDesk UI ✅ 已完成（2026-08-28，另一仓）
 
-- [ ] `src/components/Sidebar.tsx`：加 `"tasks"` page + 角标
-- [ ] `src/components/TasksPage.tsx`：列表 + 详情（复用 StreamEngine + ToolBlock / ReasonBlock）
-- [ ] `src/store/tasks.ts`：task 列表状态（按 task_id 索引，hot update via async_task_event 帧）
-- [ ] `src/ws/protocol.ts`：7 个新 type 定义
-- [ ] `src/ws/client.ts`：hello 帧带 `subscribe_async_tasks: true`
-- [ ] Chat 流 fork_task / cancel_task 工具块改 TaskBlock（跨链接）
+- [x] `src/ws/protocol.ts`：7 个新 type 定义（+ snapshot_query 预留注释）
+- [x] `src/ws/client.ts`：hello 帧带 `subscribe_async_tasks: true` + `cancelTask` / `queryTaskList`
+- [x] `src/store/tasks.ts`：TasksStore（byId + per-task 100 条 ring buffer + onFrame 帧级订阅）
+- [x] `src/components/Sidebar.tsx`：`"tasks"` page + running 角标
+- [x] `src/components/TasksPage.tsx`：列表（running 置顶）+ 空态 + refresh
+- [x] `src/components/TaskDetailPage.tsx`：详情（独立 StreamEngine 实例回放 + 实时，复用 Conversation 渲染）
+- [x] `src/components/TaskBlock.tsx` + `Conversation.tsx` 路由：Chat 流 fork/cancel/poll 工具块 cross-link
+- [x] StatusBar「N tasks running」入口
+- [x] 单测：`src/store/tasks.test.ts` + `src/components/TasksPage.test.tsx`
 
-### Phase 4: e2e + 文档
+### Phase 4: e2e + 文档 ✅ 已完成（2026-08-28）
 
-- [ ] `tests/test_e2e_async_task.py`：跑一个 subagent 改文件，主 agent poll / cancel，断言
-- [ ] `spec/ARCHITECTURE.md` §11 TODO 加 3 项；§13 新增（核心章节：AsyncTask）
-- [ ] `spec/README.md` requirements 树加本文件
+- [x] `tests/test_e2e_async_task.py`：真 RuntimeServer（随机端口 ws）+ 全装配——hello 订阅 → user_input 驱动 agent fork → created 帧 fan-out → cancel inbound → 协作中断 → status 帧 + 父通知 + list query
+- [x] `spec/ARCHITECTURE.md` §13 新增（核心章节：AsyncTask）
+- [x] `spec/README.md` requirements 树加本文件
 
 ---
 
 ## 风险
 
 - **child SessionLoop 死了父 agent 还活着**：AsyncTaskManager.cancel 必须容错（找不到 task 返 ok；task 已被 GC 也不抛异常）
-- **child 跑太慢 + parent idle destroy**：parent_sk idle timeout 不应该级联 cancel child task——child 是独立 session_key，独立 timeout；除非显式调 cancel_task
+- **idle sweep 会杀长任务**：`last_active_ts` 只在 dispatch_inbound 更新，child 跑 30min turn 期间无任何 inbound → 300s 就会被 sweep 中杀（默认 timeout 1800s 形同虚设）。这是**现存 bug**：普通 session 跑 20min 长命令 turn 同样中招。修法：engine 暴露 `step_task is not None` 的 busy 状态，sweeper 跳过运行中的 session（Phase 1 已列入）。parent 与 child 依旧解耦：parent 真正空闲超时被 destroy 不影响 child；child 完成时 notify_parent 走 lazy create 复活 parent
+- **cancel 路径的僵尸 step 风险**：若误用 `SessionLoop.task.cancel()`，cancel 不会传播到正在跑的 step_task（asyncio 语义），孤儿 react 继续调 LLM / 写 checkpoint，且可能停在「assistant.tool_calls 已落、tool result 未落」的中间态——下次 restore 后 LLM API 拒收。本设计统一走 interrupt 队列（见 §数据流「Cancel / Timeout」），单测覆盖该路径
 - **Runtime 重启 + child 中断**：启动时扫描 task.json，status=running → 改 interrupted；final_text / events 落 checkpoint；下次 agent poll_task 能看到
 - **嵌套 fork（subagent 再 fork subagent）**：fork_task tool 在 ToolRegistry 里——subagent 跟 parent 共享 registry，天然支持；但要小心 fork 风暴（一个 fork 风暴能起 N×N 个 SessionLoop）。本期不做限制（v0 不优化）；如需可加 `[async_task].max_concurrent` 配置 + AsyncTaskManager 池化
 - **wire frame 体积**：`async_task_event` 每条 token 都包成完整 frame——若 child 跑长文本 1k tokens/s，单 conn 上行 1k 帧/s。可接受（MonoDesk StreamEngine 已有 jitter buffer），监控即可，不优化
@@ -752,7 +850,7 @@ fork_task / cancel_task 工具块在 Chat 流里：
 - ❌ 远程 / 跨机器 task 调度（Runtime 进程内，本地资源）
 - ❌ per-task cost quota / 配额
 - ❌ agent 自动 fork 决策（agent 自己调 tool；本期不做「自动并行」优化）
-- ❌ bash long-running 单独 kind（用 `bash` tool + `timeout` 参数已经能做；如用户要 background bash 单独 kind 再迭代）
+- ~~❌ bash long-running 单独 kind~~ → ✅ 已实现（2026-08-28）：`kind="bash_long"` + `command` 参数，独立进程组可 kill；见「两种 kind 的执行路径」
 
 ---
 
@@ -767,7 +865,7 @@ fork_task / cancel_task 工具块在 Chat 流里：
 | **超时控制** | `maxTurns` (turn 数) + `timeout_seconds` | `timeout_sec`（wall-clock）+ hard cap 2h | subagent 是后台任务，wall-clock 更直观；hard cap 防滥用 |
 | **中断** | `TaskStop` tool / AbortController / 进程 SIGTERM | `cancel_task` tool / MonoDesk 按钮 / `asyncio.TimerHandle` → 统一 `AsyncTaskManager.cancel()` | 三个入口同一出口，状态机一致 |
 | **并发限制** | 默认 20 个（`CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS`）+ 嵌套深度 3 | **本期不做** | fork 风暴风险已知，留 v0.2+ 优化；本期宁可简单 |
-| **持久化** | `~/.claude/projects/<proj>/<sid>/subagents/agent-<id>.jsonl`（per-subagent JSONL） | `<state_root>/async/<task_id>/checkpoint.jsonl` + `task.json`（复用现有 CheckpointStore） | 完全一致的「per-task 独立 checkpoint」模型 |
+| **持久化** | `~/.claude/projects/<proj>/<sid>/subagents/agent-<id>.jsonl`（per-subagent JSONL） | `<state_root>/async:<task_id>/checkpoint.jsonl` + `task.json`（复用现有 CheckpointStore） | 完全一致的「per-task 独立 checkpoint」模型 |
 | **「异步任务」抽象** | **没有统一抽象**——Bash 后台 / Subagent 后台 / Background Session 是三层独立机制 | **统一 AsyncTask 抽象**，subagent 是 `kind="subagent"` | 「subagent 是异步任务的经典场景」是 MonoX 的更高层定位；后续加 `kind="bash_long"` 等无需新机制 |
 | **结果回传父 agent** | Agent tool result 一次性返回 final text；背景模式靠 `SendMessage` 跨 session resume | child `FinalMessage` 触发 `AsyncTaskManager.notify_parent` 投 `async-task-result` 事件到父 input_q → 复用 `wait_io` 唤醒 | MonoX 的 `LoopEngine.run` 已经有「新 InboundEvent 唤醒」机制（§7 wait_io 设计），完全复用，零 engine 改动 |
 | **跨 session resume** | 支持（agentId 引用，保留完整 conversation） | 不支持（AsyncTask 完成即终结；如需恢复用普通 session_key 单独开） | 复杂度权衡；本期 single-shot only |

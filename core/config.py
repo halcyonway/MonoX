@@ -100,6 +100,14 @@ class ServerConfig:
 
 
 @dataclass(frozen=True)
+class AsyncTaskConfig:
+    """[async_task] 配置段（见 requirements/async-task.md）。"""
+    default_timeout_sec: float = 1800.0
+    min_timeout_sec: float = 10.0
+    max_timeout_sec: float = 7200.0
+
+
+@dataclass(frozen=True)
 class Config:
     session_key: str = "default"
     llm: LLMConfig = field(default_factory=LLMConfig)
@@ -108,6 +116,7 @@ class Config:
     sandbox: SandboxConfig = field(default_factory=SandboxConfig)
     multi_channel: MultiChannelConfig = field(default_factory=MultiChannelConfig)
     server: ServerConfig = field(default_factory=ServerConfig)
+    async_task: AsyncTaskConfig = field(default_factory=AsyncTaskConfig)
     # providers 在 Config 层存一份（给 RuntimeServer 发 hello 帧用），
     # LLMConfig 里也有一份（给 LlmProxy 解析用）。
     providers: dict[str, ModelProvider] = field(default_factory=dict)
@@ -208,6 +217,7 @@ class Config:
             sandbox=SandboxConfig(**data.get("sandbox", {})),
             multi_channel=multi_ch,
             server=ServerConfig(**data.get("server", {})),
+            async_task=AsyncTaskConfig(**data.get("async_task", {})),
             providers=providers,
         )
 
