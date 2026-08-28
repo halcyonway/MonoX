@@ -126,6 +126,7 @@ class LoopEngine:
         async def pumper():
             while True:
                 ev = await input_queue.get()
+                _log.info("[pumper] session=%s ev.kind=%s event_type=%s", self._session_key, ev.kind, ev.event_type)
                 if ev.kind == "interrupt":
                     await interrupt_queue.put(ev)
                 else:
@@ -156,15 +157,25 @@ class LoopEngine:
 
         async def handle_interrupt() -> None:
             """step 跑着 → cancel 它；随后统一回 idle。"""
+            _log.info("[interrupt] handle_interrupt session=%s step_task=%s done=%s",
+                      self._session_key,
+                      self._step_task,
+                      self._step_task.done() if self._step_task else True)
             if self._step_task is not None and not self._step_task.done():
                 self._msgs_before = list(self._messages)
                 self._step_task.cancel()
                 try:
                     await asyncio.wait_for(self._step_task, timeout=5.0)
-                except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
-                    pass
+                    _log.info("[interrupt] step_task exited cleanly session=%s", self._session_key)
+                except asyncio.TimeoutError:
+                    _log.warning("[interrupt] step_task timed out after 5s, force-killing session=%s", self._session_key)
+                except asyncio.CancelledError:
+                    _log.info("[interrupt] step_task got CancelledError session=%s", self._session_key)
+                except Exception as e:
+                    _log.warning("[interrupt] step_task exception %s: %s session=%s", type(e).__name__, e, self._session_key)
             self._step_task = None
             await output_queue.put(StatusChange(state="idle"))
+            _log.info("[interrupt] handle_interrupt done, idle emitted session=%s", self._session_key)
 
         async def _race_get(a: asyncio.Queue, b: asyncio.Queue, step_t: asyncio.Task | None):
             """race 两条队列 + 可选 step task，interrupt 侧赢得抢占优先。
@@ -205,7 +216,9 @@ class LoopEngine:
         try:
             while True:
                 # C1：主循环每轮开头先扫一轮积压 interrupt
-                if take_interrupt() is not None:
+                intr_ev = take_interrupt()
+                if intr_ev is not None:
+                    _log.info("[engine] session=%s C1 interrupt taken", self._session_key)
                     await handle_interrupt()
                     continue
 
@@ -219,7 +232,9 @@ class LoopEngine:
                     # react 跑着：三方 race——sub_queue / interrupt 队列 / step 完成。
                     # interrupt 侧赢平局，保证 tool 长执行、LLM 卡流都可被立刻打断。
                     kind, payload = await _race_get(sub_queue, interrupt_queue, self._step_task)
+                    _log.info("[engine] session=%s race result kind=%s step_task=%s", self._session_key, kind, self._step_task)
                     if kind == "intr":
+                        _log.info("[engine] session=%s handling interrupt via race", self._session_key)
                         await handle_interrupt()
                         continue
                     if kind == "done":

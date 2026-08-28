@@ -443,10 +443,12 @@ async def run(cfg_path: str, args: argparse.Namespace) -> None:
         await server.broadcast_async_task(ftype, data)
 
     async def _handle_async_task_inbound(ftype: str, data: dict) -> None:
+        _log.info("[async_task_inbound] ftype=%s data=%s", ftype, data)
         if ftype == FrameType.ASYNC_TASK_CANCEL:
-            await async_task_mgr.cancel(
+            ok = await async_task_mgr.cancel(
                 data.get("task_id") or "", reason=data.get("reason") or "user"
             )
+            _log.info("[async_task_inbound] cancel result: task_id=%s ok=%s", data.get("task_id"), ok)
         elif ftype == FrameType.ASYNC_TASK_LIST_QUERY:
             filt = data.get("filter") or {}
             await async_task_mgr.emit_list(

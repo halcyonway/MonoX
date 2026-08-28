@@ -133,6 +133,8 @@ class RuntimeServer:
         """
         frame = _envelope(ftype, next(self._seq), data)
         payload = json.dumps(frame, ensure_ascii=False, default=str)
+        _log.info("[broadcast_async_task] ftype=%s subscribers=%d data_keys=%s",
+                  ftype, len(self._async_task_subscribers), list(data.keys()))
         for ws in list(self._async_task_subscribers):
             try:
                 await ws.send(payload)
@@ -329,6 +331,7 @@ class RuntimeServer:
         await self._async_task_handler(at[0], at[1])
 
     async def _dispatch_inbound(self, ev: InboundEvent) -> None:
+        _log.info("[inbound] type=%s session_key=%s source=%s", ev.kind, ev.session_key, ev.source)
         if self._inbound_handler is None:
             return
         await self._inbound_handler(ev)

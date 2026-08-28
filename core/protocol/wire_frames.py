@@ -375,7 +375,9 @@ def from_frame(
 
     session_key 规则：
     - user_input: data.session_key 优先，缺失/空字符串则用 default_session_key
-    - command / interrupt: 强制 default_session_key（防 client 跨 session 误触）
+    - interrupt: data.session_key 优先（让 MonoDesk STOP 按钮发给当前活跃 session），
+      没有则 fallback 到 default（向后兼容）
+    - command: 强制 default_session_key（command 是 channel 级别控制，不应跨 session）
 
     任何解析失败（坏 JSON / 非 dict / 未知 type / 缺字段）→ 返回 None。
     """
@@ -432,8 +434,13 @@ def from_frame(
             timestamp=ts,
         )
     if mtype == FrameType.INTERRUPT:
+        # session_key 优先用 data 里的（前端带过来），没有则 fallback 到 default。
+        # 这是 MonoDesk STOP 按钮的正确行为：发给当前活跃 session，不是硬编码 default。
+        sk = data.get("session_key")
+        if not isinstance(sk, str) or not sk:
+            sk = default_session_key
         return InboundEvent(
-            session_key=default_session_key,
+            session_key=sk,
             kind="interrupt",
             text="",
             source=default_source,
