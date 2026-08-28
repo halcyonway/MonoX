@@ -169,13 +169,24 @@ def test_from_frame_command_uses_default_session_key():
     assert ev.session_key == "real"  # BAD 被忽略
 
 
-def test_from_frame_interrupt_uses_default_session_key():
-    f = {"type": "interrupt", "data": {"session_key": "BAD"}}
-    ev = from_frame(f, default_session_key="real", default_source="x")
+def test_from_frame_interrupt_uses_data_session_key_or_default():
+    # 前端带 session_key 时优先用（STOP 按钮发给当前活跃 session）
+    f = {"type": "interrupt", "data": {"session_key": "monodesk:abc123"}}
+    ev = from_frame(f, default_session_key="default", default_source="x")
     assert ev is not None
     assert ev.kind == "interrupt"
     assert ev.text == ""
-    assert ev.session_key == "real"
+    assert ev.session_key == "monodesk:abc123"
+    # data.session_key 缺失时 fallback 到 default（向后兼容）
+    f2 = {"type": "interrupt", "data": {}}
+    ev2 = from_frame(f2, default_session_key="fallback_sk", default_source="x")
+    assert ev2 is not None
+    assert ev2.session_key == "fallback_sk"
+    # data 整个缺失也 fallback
+    f3 = {"type": "interrupt", "data": None}
+    ev3 = from_frame(f3, default_session_key="fallback_sk", default_source="x")
+    assert ev3 is not None
+    assert ev3.session_key == "fallback_sk"
 
 
 def test_from_frame_unknown_type_returns_none():

@@ -200,16 +200,40 @@ def test_inbound_default_session_key_when_hello_omits():
         h.stop()
 
 
-def test_interrupt_uses_default_session_key_even_if_data_has_one():
+def test_interrupt_uses_data_session_key_or_default():
+    # interrupt: data.session_key 优先（STOP 按钮发给当前活跃 session）
     h = ServerHandle(default_session_key="REAL")
     h.start()
     try:
         with sync_connect(f"ws://127.0.0.1:{h.port}", open_timeout=2) as ws:
             ws.send(json.dumps(_hello_frame("REAL", "monodesk")))
+            # 前端带 session_key 时用它
             ws.send(json.dumps({
                 "v": 1, "type": "interrupt",
                 "seq": 1, "ts": 0,
                 "data": {"session_key": "BAD"},
+            }))
+            ev = asyncio.run_coroutine_threadsafe(
+                asyncio.wait_for(h.loop_input.get(), timeout=2),
+                h._loop,
+            ).result(timeout=3)
+            assert ev.kind == "interrupt"
+            assert ev.session_key == "BAD"
+    finally:
+        h.stop()
+
+
+def test_interrupt_falls_back_to_default_when_no_session_key():
+    h = ServerHandle(default_session_key="REAL")
+    h.start()
+    try:
+        with sync_connect(f"ws://127.0.0.1:{h.port}", open_timeout=2) as ws:
+            ws.send(json.dumps(_hello_frame("REAL", "monodesk")))
+            # 没有 data.session_key 时 fallback
+            ws.send(json.dumps({
+                "v": 1, "type": "interrupt",
+                "seq": 1, "ts": 0,
+                "data": {},
             }))
             ev = asyncio.run_coroutine_threadsafe(
                 asyncio.wait_for(h.loop_input.get(), timeout=2),
