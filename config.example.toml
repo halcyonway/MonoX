@@ -112,3 +112,12 @@ extensions_skills_dir = "./extensions/skills"
 tmp_root       = "./.monox/tmp"
 # L1 skill 自动注入 system prompt 的上限；超限时按字典序截断并 warn
 skills_max_l1  = 50
+
+# ============================================================
+# [async_task] 异步任务（subagent）配置
+# ============================================================
+# 见 spec/requirements/async-task.md。不配置时用下面的默认值。
+# [async_task]
+# default_timeout_sec = 1800.0   # 默认 30min
+# min_timeout_sec     = 10.0
+# max_timeout_sec     = 7200.0   # 2h hard cap

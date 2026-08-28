@@ -172,3 +172,58 @@ class TestTerminalChannel:
 
         await asyncio.gather(drain(), feed())
         assert received_events[0].source == "terminal"
+
+
+# ----------------------------------------------------------------------
+# async task：/cancel 命令 + 折叠打印（requirements/async-task.md Phase 2）
+# ----------------------------------------------------------------------
+
+class TestAsyncTaskFrames:
+    @pytest.fixture
+    def ch(self) -> TerminalChannel:
+        return TerminalChannel(session_key="test", debug=False)
+
+    async def test_cancel_command_goes_to_raw_outbound(self, ch: TerminalChannel):
+        """/cancel t_x → raw_outbound 出现 async_task_cancel 帧，不进消息队列。"""
+        # 模拟 _read_loop 的 /cancel 分支：直接驱动 read loop 的输入路径
+        async def fake_prompt_async():
+            ch._stop.set()
+            return "/cancel t_abc123"
+        ch._prompt_session.prompt_async = fake_prompt_async
+        await asyncio.wait_for(ch._read_loop(), timeout=2.0)
+        frame = ch.raw_outbound.get_nowait()
+        assert frame["type"] == "async_task_cancel"
+        assert frame["data"] == {"task_id": "t_abc123", "reason": "user"}
+        # 普通消息队列无残留
+        assert ch._queue.empty()
+
+    async def test_handle_raw_frame_folds_prints(self, ch: TerminalChannel):
+        """created / tool_end / status 折叠成行；token 帧静默。"""
+        lines: list[str] = []
+
+        def _capture_print(*args, **kwargs):
+            # Rich console.print(self.console) — 捕获渲染文本
+            from rich.text import Text
+            seg = args[0] if args else ""
+            lines.append(str(seg))
+
+        ch.console.print = _capture_print  # type: ignore[method-assign]
+
+        await ch.handle_raw_frame({"type": "async_task_created", "data": {
+            "task_id": "t_x", "kind": "subagent", "description": "review PR"}})
+        await ch.handle_raw_frame({"type": "async_task_event", "data": {
+            "task_id": "t_x",
+            "event": {"type": "token", "data": {"text": "noise"}}}})
+        await ch.handle_raw_frame({"type": "async_task_event", "data": {
+            "task_id": "t_x",
+            "event": {"type": "tool_end", "data": {
+                "name": "bash", "latency_ms": 214, "result": {"exit_code": 0}}}}})
+        await ch.handle_raw_frame({"type": "async_task_status", "data": {
+            "task_id": "t_x", "status": "completed", "duration_sec": 47.2,
+            "final_text": "found 1 issue"}})
+
+        joined = "\n".join(lines)
+        assert "review PR" in joined
+        assert "bash" in joined and "214ms" in joined
+        assert "completed in 47s" in joined and "found 1 issue" in joined
+        assert "noise" not in joined  # token 被折叠掉

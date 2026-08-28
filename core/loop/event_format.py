@@ -157,9 +157,12 @@ User-side events:
     <attachment name="screenshot.png" mime="image/png">base64-encoded-image-data...</attachment>
   </event>
   - `ts`: Unix seconds (float). Use to compute latency / ordering.
-  - `kind`: user_input (interactive), command (slash command like /reset).
-  - `channel`: source identifier (monodesk / terminal / cron / etc.).
-  - `event_type`: sub-classification (user-input / scheduled-task / ...).
+  - `kind`: user_input (interactive), command (slash command like /reset),
+    system (runtime-generated notification — NOT typed by the user; e.g.
+    async-task results from your fork_task background tasks).
+  - `channel`: source identifier (monodesk / terminal / async_task / etc.).
+  - `event_type`: sub-classification (user-input / scheduled-task /
+    async-task-result / ...).
   - `<attachment>`: inline file/image embedded as base64. The `name` attribute is the
     original filename or path; `mime` is the MIME type (e.g. `image/png`).
     You can call `multimodalunderstand(attachment_url="/path/to/file")` to analyze it.

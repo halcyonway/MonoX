@@ -31,6 +31,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from core.async_task import AsyncTaskManager
 from core.config import Config, session_paths
 from core.logging_setup import setup_logging
 from core.debug_server import DebugServer, DebugServerConfig, FsTraceProvider
@@ -45,7 +46,11 @@ from core.loop import (
     WaitIoTool,
 )
 from core.loop.compression import CompressionService
+from core.loop.tools.cancel_task import CancelTaskTool
+from core.loop.tools.fork_task import ForkTaskTool
+from core.loop.tools.poll_task import PollTaskTool
 from core.memory import FsMemoryStore
+from core.protocol.wire_frames import FrameType
 from core.runtime_server import RuntimeServer
 from core.sandbox import BashRunner
 from core.session_manager import SessionManager
@@ -409,6 +414,8 @@ async def run(cfg_path: str, args: argparse.Namespace) -> None:
 
     # SessionManager ↔ RuntimeServer 通过 async 回调协作
     async def _register(sk: str, q: asyncio.Queue) -> None:
+        if sk.startswith("async:"):
+            return  # child session：不注册 RuntimeServer consumer，output_q 归 AsyncTaskBridge
         await server.register_outbound_queue(sk, q)
 
     async def _unregister(sk: str) -> None:
@@ -431,6 +438,35 @@ async def run(cfg_path: str, args: argparse.Namespace) -> None:
     )
     server.set_inbound_handler(session_mgr.dispatch_inbound)
 
+    # AsyncTask（subagent 是经典场景）：见 spec/requirements/async-task.md
+    async def _broadcast_async_task(ftype: str, data: dict) -> None:
+        await server.broadcast_async_task(ftype, data)
+
+    async def _handle_async_task_inbound(ftype: str, data: dict) -> None:
+        if ftype == FrameType.ASYNC_TASK_CANCEL:
+            await async_task_mgr.cancel(
+                data.get("task_id") or "", reason=data.get("reason") or "user"
+            )
+        elif ftype == FrameType.ASYNC_TASK_LIST_QUERY:
+            filt = data.get("filter") or {}
+            await async_task_mgr.emit_list(
+                session_key=data.get("session_key") or "",
+                status=filt.get("status"),
+            )
+
+    async_task_mgr = AsyncTaskManager(
+        session_manager=session_mgr,
+        state_root=state_root,
+        on_event=_broadcast_async_task,
+        default_timeout_sec=cfg.async_task.default_timeout_sec,
+        bash_cwd=paths["workspace"],  # bash_long 的 cwd 与 agent 的 bash tool 一致
+    )
+    async_task_mgr.load_from_disk()
+    server.set_async_task_handler(_handle_async_task_inbound)
+    tools.add(ForkTaskTool(async_task_mgr))
+    tools.add(PollTaskTool(async_task_mgr))
+    tools.add(CancelTaskTool(async_task_mgr))
+
     health_port = args.health_port if args.health_port is not None else 8767
     health = HealthServer(
         HealthServerConfig(port=health_port),
@@ -448,7 +484,8 @@ async def run(cfg_path: str, args: argparse.Namespace) -> None:
 
     print(
         f"[monox-runtime] ws :{cfg.server.port} (default_session_key={cfg.session_key!r}), "
-        f"health :{health_port}, debug :{debug_port}, idle_timeout={session_mgr._idle_timeout_sec}s",
+        f"health :{health_port}, debug :{debug_port}, idle_timeout={session_mgr._idle_timeout_sec}s, "
+        f"async_tasks_restored={len(async_task_mgr.list())}",
         flush=True,
     )
 
@@ -461,6 +498,7 @@ async def run(cfg_path: str, args: argparse.Namespace) -> None:
     finally:
         if feishu_proc is not None and feishu_proc.poll() is None:
             feishu_proc.terminate()
+        await async_task_mgr.shutdown()  # 先收摊 async task（flush task.json）
         await session_mgr.stop()
         await server.stop()
         await health.stop()

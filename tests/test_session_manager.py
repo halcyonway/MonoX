@@ -235,3 +235,73 @@ class TestStop:
         await sm.dispatch_inbound(InboundEvent(session_key="s2", kind="message", text="y", source="a"))
         await sm.stop()
         assert sm._sessions == {}
+
+
+# ----------------------------------------------------------------------
+# idle sweeper 与长任务（requirements/async-task.md：busy session 不销毁）
+# ----------------------------------------------------------------------
+
+class _BlockLLM:
+    """stream() 永远挂起——模拟长 turn（20min bash / subagent）。"""
+
+    async def stream(self, messages, tools=None, options=None):
+        await asyncio.Event().wait()
+        yield  # pragma: no cover — 不可达
+
+
+@pytest.mark.asyncio
+async def test_idle_sweeper_skips_busy_session():
+    """react step 运行中：超 idle_timeout 也不销毁；turn 结束后下一轮正常回收。"""
+    from core.loop.compression import CompressionService
+    from core.loop.tools.read_tr_budget import ReadToolResultBudgetTool
+
+    tmp = Path("/tmp/test_sm_busy"); shutil.rmtree(tmp, ignore_errors=True); tmp.mkdir()
+    clock = {"now": 1000.0}
+    sm = SessionManager(
+        llm=_BlockLLM(),
+        compression_llm=MagicMock(),
+        tools=MagicMock(),
+        compression=CompressionService(
+            budget_tool=ReadToolResultBudgetTool(), llm=MagicMock()
+        ),
+        memory=FsMemoryStore(tmp / "mem"),
+        state_root=tmp / "state",
+        traces_root=tmp / "traces",
+        system_prompt="test",
+        path_vars={
+            "MONOX_HOME": str(tmp), "MONOX_WORKSPACE_DIR": str(tmp / "ws"),
+            "MONOX_MEMORY_DIR": str(tmp / "mem"), "MONOX_SKILLS_DIR": str(tmp / "s"),
+            "MONOX_TMP_DIR": str(tmp / "t"),
+        },
+        time_fn=lambda: clock["now"],
+        idle_timeout_sec=10.0,
+        sweep_interval_sec=0.1,
+        enable_traces=False,
+    )
+    await sm.start()
+    try:
+        await sm.dispatch_inbound(InboundEvent(session_key="s1", kind="message", text="long job", source="a"))
+        sl = sm._sessions["s1"]
+        for _ in range(100):
+            if sl.loop_engine.is_busy:
+                break
+            await asyncio.sleep(0.02)
+        assert sl.loop_engine.is_busy, "engine 应进入 busy"
+
+        # clock 推过 idle_timeout，sweeper 跑多轮 → busy session 不销毁
+        clock["now"] = 1100.0
+        await asyncio.sleep(0.5)
+        assert "s1" in sm._sessions, "step 运行中的 session 不应被 sweep"
+
+        # step 结束（协 作中断路径：cancel step → engine 回 idle）→ 下一轮 sweep 回收
+        sl.loop_engine._step_task.cancel()
+        for _ in range(100):
+            if not sl.loop_engine.is_busy:
+                break
+            await asyncio.sleep(0.02)
+        assert not sl.loop_engine.is_busy
+        clock["now"] = 1200.0
+        await asyncio.sleep(0.5)
+        assert "s1" not in sm._sessions, "空闲后应被正常回收"
+    finally:
+        await sm.stop()

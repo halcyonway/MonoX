@@ -12,6 +12,7 @@ input_queue 始终由 Gateway 写入；engine 内部 drain 不到东西 = 没新
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import logging
 import time
@@ -28,6 +29,7 @@ from core.loop.tools.read_tr_budget import ReadToolResultBudgetTool
 from core.observability.collector import TraceCollector
 from core.protocol import (
     CheckpointStore,
+    ErrorEvent,
     FinalMessage,
     InboundEvent,
     LLMProxy,
@@ -49,6 +51,18 @@ WAIT_IO_NAME = "wait_io"
 
 # _react 被中断时返回的哨兵 final_text；run() 据此走中断清理而不是 FinalMessage。
 _INTERRUPTED = "__interrupted__"
+
+# fork_task 这类 tool 需要知道「当前在哪个 session 里执行」——Tool 协议签名没有
+# session 上下文，ToolRegistry 又是全 session 共享的。engine 在 tool dispatch 处
+# set 这个 contextvar（见 requirements/async-task.md「parent_session_key 从哪来」）。
+_current_session_key: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "monox_current_session_key", default=None,
+)
+
+
+def current_session_key() -> str | None:
+    """tool 执行期间可读：当前 dispatch 该 tool 的 session_key（engine 之外为 None）。"""
+    return _current_session_key.get()
 
 
 class LoopEngine:
@@ -81,6 +95,9 @@ class LoopEngine:
         self._traces = traces
         # 当前请求使用的 provider 名（来自 user_input meta.model_provider）
         self._model_provider: str | None = None
+        # 当前 react step 的 task；interrupt 会取消它。run() 的唯一 mutator，
+        # is_busy 属性供 SessionManager idle sweeper 判断「step 运行中不销毁」。
+        self._step_task: asyncio.Task[str] | None = None
 
         self._messages: list[dict[str, Any]] = []
         self._step_idx = 0
@@ -88,6 +105,11 @@ class LoopEngine:
         # 当前 run / turn 的 trace_id，喂给 StatusChange / MetricChunk / FinalMessage。
         self._run_id: str | None = None
         self._current_turn_id: str | None = None
+
+    @property
+    def is_busy(self) -> bool:
+        """react step 是否在跑（run() 已启动且未到下一个等待点）。"""
+        return self._step_task is not None and not self._step_task.done()
 
     async def run(
         self,
@@ -134,15 +156,14 @@ class LoopEngine:
 
         async def handle_interrupt() -> None:
             """step 跑着 → cancel 它；随后统一回 idle。"""
-            nonlocal step_task
-            if step_task is not None and not step_task.done():
+            if self._step_task is not None and not self._step_task.done():
                 self._msgs_before = list(self._messages)
-                step_task.cancel()
+                self._step_task.cancel()
                 try:
-                    await asyncio.wait_for(step_task, timeout=5.0)
+                    await asyncio.wait_for(self._step_task, timeout=5.0)
                 except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
                     pass
-            step_task = None
+            self._step_task = None
             await output_queue.put(StatusChange(state="idle"))
 
         async def _race_get(a: asyncio.Queue, b: asyncio.Queue, step_t: asyncio.Task | None):
@@ -179,8 +200,7 @@ class LoopEngine:
                 return "done", None
             return "msg", t_a.result()
 
-        # 当前 react step 的 task；interrupt 会取消它。
-        step_task: asyncio.Task[str] | None = None
+        # 当前 react step 的 task 挂在 self._step_task（见 __init__）；interrupt 会取消它。
 
         try:
             while True:
@@ -189,7 +209,7 @@ class LoopEngine:
                     await handle_interrupt()
                     continue
 
-                if step_task is None:
+                if self._step_task is None:
                     kind, payload = await _race_get(sub_queue, interrupt_queue, None)
                     if kind == "intr":
                         await handle_interrupt()
@@ -198,16 +218,16 @@ class LoopEngine:
                 else:
                     # react 跑着：三方 race——sub_queue / interrupt 队列 / step 完成。
                     # interrupt 侧赢平局，保证 tool 长执行、LLM 卡流都可被立刻打断。
-                    kind, payload = await _race_get(sub_queue, interrupt_queue, step_task)
+                    kind, payload = await _race_get(sub_queue, interrupt_queue, self._step_task)
                     if kind == "intr":
                         await handle_interrupt()
                         continue
                     if kind == "done":
                         try:
-                            final_text = step_task.result()
+                            final_text = self._step_task.result()
                         except asyncio.CancelledError:
                             await finalize_aborted("cancelled")
-                            step_task = None
+                            self._step_task = None
                             continue
                         except Exception as exc:
                             # LLM / 工具异常兜底：不能让异常杀死 run() 循环，
@@ -219,14 +239,14 @@ class LoopEngine:
                                 retryable=True,
                             ))
                             await finalize_aborted("error")
-                            step_task = None
+                            self._step_task = None
                             continue
 
                         if final_text == _INTERRUPTED:
                             # C2/C3 协作中止路径：_react 已消费触发的那条 interrupt，
                             # 这里只做统一清理（连发余量已在 take_interrupt/_react 吞掉）。
                             await finalize_aborted("cancelled")
-                            step_task = None
+                            self._step_task = None
                             continue
 
                         await output_queue.put(
@@ -241,7 +261,7 @@ class LoopEngine:
                             await self._traces.end_run(final_text, status="ok")
                             self._run_id = None
                             self._current_turn_id = None
-                        step_task = None
+                        self._step_task = None
                         continue
                     ev = payload  # kind == "msg"：step 跑着收到新消息，追加进上下文由本 step 聚合
 
@@ -262,7 +282,7 @@ class LoopEngine:
                 # 可观测性：起一次新 run；记录后 self._run_id 可用于 stamp 后续事件
                 if self._traces is not None and self._run_id is None:
                     self._run_id = await self._traces.begin_run(ev.text)
-                step_task = asyncio.create_task(
+                self._step_task = asyncio.create_task(
                     self._react(sub_queue, interrupt_queue, output_queue)
                 )
         finally:
@@ -604,6 +624,8 @@ class LoopEngine:
                     tool_status = "error"
                 else:
                     t0 = time.monotonic()
+                    # 暴露「谁在调我」给 tool 层（fork_task 定位 parent 用）；见模块头注释
+                    _cv_token = _current_session_key.set(self._session_key)
                     try:
                         result = await tool.execute(call_id, args)
                     except Exception as exc:
@@ -617,6 +639,8 @@ class LoopEngine:
                             exit_code=-1,
                         )
                         tool_status = "error"
+                    finally:
+                        _current_session_key.reset(_cv_token)
                     latency_ms = int((time.monotonic() - t0) * 1000)
                     if result.status == "error":
                         tool_status = "error"

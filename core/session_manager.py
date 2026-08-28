@@ -166,6 +166,14 @@ class SessionManager:
             sk for sk, sl in self._sessions.items() if sl.task is not None
         )
 
+    def get_loop(self, session_key: str) -> SessionLoop | None:
+        """按 session_key 取 SessionLoop（不存在返回 None）。AsyncTaskManager 用。"""
+        return self._sessions.get(session_key)
+
+    async def destroy_session(self, session_key: str) -> None:
+        """公共销毁入口，幂等。AsyncTaskManager cancel 后收摊 child session 用。"""
+        await self._destroy_session(session_key)
+
     # ------------------------------------------------------------------
     # Session lifecycle
     # ------------------------------------------------------------------
@@ -237,5 +245,10 @@ class SessionManager:
             now = self._time_fn()
             for sk, sl in list(self._sessions.items()):
                 if (now - sl.last_active_ts) > self._idle_timeout_sec:
+                    # react step 运行中不销毁——last_active_ts 只在 dispatch_inbound 更新，
+                    # 长 turn（20min bash / subagent）没有任何 inbound，sweep 掉等于中途
+                    # 杀任务。等下一个 sweep 周期，turn 结束后再正常回收。
+                    if sl.loop_engine.is_busy:
+                        continue
                     _log.info("session %r idle timeout → destroy", sk)
                     await self._destroy_session(sk)

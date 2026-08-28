@@ -23,6 +23,16 @@ from core.memory import FsMemoryStore
 from core.observability import JsonlTraceStore, TraceCollector
 from core.protocol import InboundEvent, LlmChunk, LLMProxy, ToolResult
 
+# memory 功能后 assemble_messages 的 memory_section 需要 path_vars（run.py 装配时提供）
+_PATH_VARS = {
+    "MONOX_HOME": "/tmp",
+    "MONOX_WORKSPACE_DIR": "/tmp/ws",
+    "MONOX_MEMORY_DIR": "/tmp/mem",
+    "MONOX_SKILLS_DIR": "/tmp/skills",
+    "MONOX_TMP_DIR": "/tmp/tmp",
+}
+
+
 
 class _MockLLMTool(LLMProxy):
     """一轮 yield tool_call (bash)，下一轮 yield stop final。"""
@@ -111,6 +121,7 @@ def _build_engine(
         compression=compression,
         memory=mem,
         checkpoint=ck,
+        path_vars=_PATH_VARS,
                 max_steps=5,
         traces=collector,
     )
@@ -263,6 +274,7 @@ async def test_engine_records_act_span_for_wait_io(tmp_path: Path):
         compression=comp,
         memory=mem,
         checkpoint=ck,
+        path_vars=_PATH_VARS,
                 max_steps=5,
         traces=collector,
     )

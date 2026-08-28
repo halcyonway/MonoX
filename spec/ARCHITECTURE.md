@@ -374,9 +374,9 @@ InboundEvent
 
 ### 12.3 ws 帧格式 v1
 
-帧信封：`{"v": 1, "type": <one_of_13>, "seq": <int>, "ts": <float>, "data": <object>}`
+帧信封：`{"v": 1, "type": <one_of_14>, "seq": <int>, "ts": <float>, "data": <object>}`
 
-13 个 `type` 字符串集中定义在 `core/protocol/wire_frames.py:FrameType`。
+14 个 `type` 字符串集中定义在 `core/protocol/wire_frames.py:FrameType`（10 个 StreamEvent 出站 + hello + user_input / command / interrupt 3 个入站）。
 
 #### 出站（Runtime → Channel ws client）
 
@@ -568,3 +568,70 @@ class MultiChannelConfig:
 `run.py` 按 `kind` 用 `_build_channel(kind, options, session_key)` 派发构造；
 未识别的 kind 警告并跳过。每个 channel 自己解析 `options`（channel-specific
 schema 不进 core）。
+
+---
+
+## 13. AsyncTask —— 异步任务（subagent 是经典场景）
+
+> 完整设计见 `requirements/async-task.md`。本节是架构层摘要。
+
+### 13.1 一句话
+
+agent 在 turn 中调 `fork_task` 起一个后台任务（child = 普通 SessionLoop，
+`session_key = "async:<task_id>"`），继续当前 turn；任务完成 / 取消时
+`AsyncTaskManager` 把结果作为 InboundEvent 投回父 session 的 input_q——
+复用 engine 既有的「新事件唤醒」机制，ReAct 状态机零改动。
+
+### 13.2 模块与协议
+
+```
+core/async_task.py        AsyncTask（状态机：running → completed/failed/
+                          cancelled/timed_out/interrupted）+ AsyncTaskManager
+                          + AsyncTaskBridge（消费 child output_q）
+core/loop/tools/          fork_task / poll_task / cancel_task（注册进共享
+                          ToolRegistry → subagent 天然支持嵌套 fork）
+wire_frames.py            7 个 async_task_* 帧（5 出 + 2 入），wire 层专用，
+                          不进 StreamEvent（先例 hello）
+RuntimeServer             _async_task_subscribers（hello 带
+                          subscribe_async_tasks=true 的 conn）+ 全局 fan-out +
+                          2 个 inbound 直路由（不经 SessionManager）
+run.py                    装配 + _register 滤 async: 前缀 + shutdown 接线
+```
+
+### 13.3 三个关键决策（why）
+
+1. **parent_session_key 用 engine contextvar**——`Tool.execute(call_id, args)`
+   没有 session 上下文，ToolRegistry 全 session 共享；engine 在 tool dispatch
+   处 set `_current_session_key`（唯一一次动 LoopEngine，2 行），fork_task 执行
+   时读取。嵌套 fork 自动正确。
+2. **cancel 走 interrupt 队列**——不 `task.cancel()` SessionLoop.task（cancel
+   不跨任务传播，会留孤儿 react step + checkpoint 中间态）；投
+   `kind="interrupt"` 进 child input_q，复用 engine 协作中断（回滚 + idle），
+   等 idle 后 destroy。三种入口（cancel_task tool / MonoDesk 按钮 / timeout
+   TimerHandle）同一出口。
+3. **child output_q 单消费者**——`SessionManager._create` 无条件注册 outbound
+   consumer，run.py 的 `_register` 对 `async:` 前缀跳过，否则 RuntimeServer
+   consumer 跟 AsyncTaskBridge 抢同一个 Queue，child 流被随机劈半且静默丢弃。
+
+### 13.4 Channel 呈现
+
+| channel | 呈现 |
+|---|---|
+| MonoDesk | Tasks 侧栏页（列表 + 详情复用 StreamEngine）+ Chat 流 TaskBlock cross-link；hello 订阅全局帧 |
+| terminal / textual | 折叠打印（created / tool_end / status 一行式）；`/cancel <task_id>` 命令走 raw 帧旁路 |
+| feishu | created 发卡片、status 终态回写（中间事件不刷，防 API 频控） |
+
+terminal / textual / feishu 通过 `RuntimeWSClient.set_raw_frame_handler` +
+channel 的 duck-type 扩展（`handle_raw_frame` / `raw_outbound` 队列）收发
+async 帧——Channel 协议本体不变。
+
+### 13.5 与既有机制的关系
+
+- **idle sweeper**：跳过「react step 运行中」的 session——长 turn（subagent
+  / 20min bash）不再被 300s idle 误杀（普通 session 同样受益）。
+- **notify_parent**：`_finish` 把结果作为 `kind="message"`、
+  `event_type="async-task-result"` 的 InboundEvent 投父 input_q；父在
+  wait_io → 唤醒新 turn；父在 turn 中 → 下一个 drain 点聚合进当前 turn。
+- **存储**：child 复用既有 sk 派生路径（`<state_root>/async:<task_id>/
+  checkpoint.jsonl` + 同目录 `task.json`，start 即落盘）；重启扫描把 running
+  标记为 interrupted。

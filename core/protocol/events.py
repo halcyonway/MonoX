@@ -22,10 +22,13 @@ class File:
 @dataclass(frozen=True)
 class InboundEvent:
     session_key: str
-    kind: Literal["message", "interrupt", "command", "attachment"]
+    # kind 是传输层载荷类型（封闭枚举，engine 分流依据）：interrupt 走高优先级
+    # 中断队列，其余全部进 sub_queue 当消息聚合。system = runtime 内部产生的
+    # 通知（如 async-task-result），非用户输入——语义区分靠 event_type 贴标签。
+    kind: Literal["message", "interrupt", "command", "attachment", "system"]
     text: str
     source: str = "default"           # 来源标识：channel 名或其他信号源
-    event_type: str = "user-input"   # 事件类型：user-input / scheduled-task / system-notify / command 等
+    event_type: str = "user-input"   # 事件类型：user-input / scheduled-task / system-notify / async-task-result 等
     timestamp: float = 0.0             # Unix 时间戳（秒，浮点）
     attachments: tuple[File, ...] = ()
     meta: dict[str, Any] = field(default_factory=dict)

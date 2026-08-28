@@ -367,3 +367,103 @@ def test_encode_decode_round_trip():
 def test_decode_bad_json_returns_none():
     assert decode("not json{") is None
     assert decode(b"\x00\x01") is None
+
+# ----------------------------------------------------------------------
+# async_task_* 帧（wire 层专用，见 requirements/async-task.md）
+# ----------------------------------------------------------------------
+
+from core.protocol.wire_frames import (  # noqa: E402
+    ASYNC_TASK_INBOUND_TYPES,
+    ASYNC_TASK_OUTBOUND_TYPES,
+    FrameType,
+    async_task_created_frame,
+    async_task_event_frame,
+    async_task_inbound_from_frame,
+    async_task_list_frame,
+    async_task_snapshot_frame,
+    async_task_status_frame,
+)
+
+
+def test_async_task_frame_type_constants():
+    assert FrameType.ASYNC_TASK_CREATED == "async_task_created"
+    assert FrameType.ASYNC_TASK_EVENT == "async_task_event"
+    assert FrameType.ASYNC_TASK_STATUS == "async_task_status"
+    assert FrameType.ASYNC_TASK_LIST == "async_task_list"
+    assert FrameType.ASYNC_TASK_SNAPSHOT == "async_task_snapshot"
+    assert FrameType.ASYNC_TASK_CANCEL == "async_task_cancel"
+    assert FrameType.ASYNC_TASK_LIST_QUERY == "async_task_list_query"
+    assert len(ASYNC_TASK_OUTBOUND_TYPES) == 5
+    assert len(ASYNC_TASK_INBOUND_TYPES) == 2
+    # 与既有集合不相交
+    assert ASYNC_TASK_OUTBOUND_TYPES | ASYNC_TASK_INBOUND_TYPES \
+        and not (ASYNC_TASK_OUTBOUND_TYPES & ASYNC_TASK_INBOUND_TYPES)
+
+
+def test_async_task_created_frame_fields():
+    f = async_task_created_frame(
+        session_key="default",
+        task_id="t_4f9ea1b2c3d4",
+        kind="subagent",
+        description="review PR",
+        meta={"priority": "high"},
+        parent_session_key="default",
+        timeout_sec=1800.0,
+        created_at=1732000000.0,
+        seq=7,
+    )
+    assert f["v"] == PROTOCOL_VERSION and f["type"] == "async_task_created" and f["seq"] == 7
+    d = f["data"]
+    assert d["task_id"] == "t_4f9ea1b2c3d4" and d["kind"] == "subagent"
+    assert d["parent_session_key"] == "default" and d["timeout_sec"] == 1800.0
+
+
+def test_async_task_event_frame_nests_stream_event():
+    f = async_task_event_frame(
+        session_key="default", task_id="t_x", event=TokenChunk(text="hi"), seq=1
+    )
+    assert f["type"] == "async_task_event"
+    inner = f["data"]["event"]
+    assert inner["type"] == "token" and inner["data"]["text"] == "hi"
+    assert f["data"]["session_key"] == "default" and f["data"]["task_id"] == "t_x"
+    # 内层可被 frame_to_stream_event 同源逻辑还原
+    restored = frame_to_stream_event({"type": inner["type"], "data": inner["data"]})
+    assert isinstance(restored, TokenChunk) and restored.text == "hi"
+
+
+def test_async_task_status_frame_nullables():
+    f = async_task_status_frame(
+        session_key="p", task_id="t_x", status="cancelled",
+        finished_at=1732000100.0, duration_sec=100.0, cancel_reason="timeout", seq=2,
+    )
+    d = f["data"]
+    assert d["status"] == "cancelled" and d["cancel_reason"] == "timeout"
+    assert d["final_text"] is None and d["error"] is None
+
+
+def test_async_task_list_and_snapshot_frames():
+    lf = async_task_list_frame(session_key="default", tasks=[{"task_id": "t_x", "status": "running"}])
+    assert lf["type"] == "async_task_list" and lf["data"]["tasks"][0]["task_id"] == "t_x"
+    sf = async_task_snapshot_frame(
+        session_key="default", task={"task_id": "t_x"}, recent_events=[{"kind": "status"}]
+    )
+    assert sf["type"] == "async_task_snapshot"
+    assert sf["data"]["recent_events"] == [{"kind": "status"}]
+
+
+def test_async_task_inbound_from_frame():
+    at = async_task_inbound_from_frame({
+        "v": 1, "type": "async_task_cancel",
+        "data": {"task_id": "t_x", "reason": "user"},
+    })
+    assert at == ("async_task_cancel", {"task_id": "t_x", "reason": "user"})
+    at2 = async_task_inbound_from_frame({
+        "v": 1, "type": "async_task_list_query", "data": {"session_key": "default"},
+    })
+    assert at2 is not None and at2[0] == "async_task_list_query"
+    # 非 async 帧返回 None
+    assert async_task_inbound_from_frame({"type": "user_input", "data": {"text": "hi"}}) is None
+    assert async_task_inbound_from_frame({"type": "async_task_cancel"}) == \
+        ("async_task_cancel", {})
+    assert async_task_inbound_from_frame("not a dict") is None
+    assert async_task_inbound_from_frame(None) is None

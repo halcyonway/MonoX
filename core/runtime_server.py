@@ -15,7 +15,8 @@ source 对应的 ws conn。
 - `last_active_source[session_key]` 追踪该 session 最近上行的 source；fan-out 时按 source 找 conn
 - session 销毁（idle destroy）时由 `unregister_outbound_queue` 清掉对应 last_active 条目
 - hello 帧 schema：`data.session_key` / `data.source`——`session_key` 作为该 channel 的
-  default session_key（帧缺 session_key 时回退用）；`source` 作为连接索引 key
+  default session_key（帧缺 session_key 时回退用）；`source` 作为连接索引 key；
+  `data.subscribe_async_tasks=true`（additive）把 conn 加入 async task 全局订阅
 """
 from __future__ import annotations
 
@@ -35,7 +36,15 @@ from websockets.asyncio.server import ServerConnection, serve
 from websockets.exceptions import ConnectionClosed
 
 from core.protocol import InboundEvent, StreamEvent
-from core.protocol.wire_frames import decode, frame_to_stream_event, from_frame, hello_frame, to_frame
+from core.protocol.wire_frames import (
+    _envelope,
+    async_task_inbound_from_frame,
+    decode,
+    frame_to_stream_event,
+    from_frame,
+    hello_frame,
+    to_frame,
+)
 
 
 @dataclass(frozen=True)
@@ -49,6 +58,8 @@ InboundHandler = Callable[[InboundEvent], Awaitable[None]]
 # session_key → 从 SessionLoop.output_q 取 event 后怎么发（RuntimeServer 内部实现）。
 # 这里仅是 consumer task 的 in-q 注册，框架不暴露给外部回调。
 OutboundConsumer = asyncio.Task[None]
+# async_task_cancel / async_task_list_query 的直路由回调（run.py 装配到 AsyncTaskManager）。
+AsyncTaskHandler = Callable[[str, dict[str, Any]], Awaitable[None]]
 
 
 class RuntimeServer:
@@ -88,6 +99,11 @@ class RuntimeServer:
         # inbound handler 单一注册点；不设置则 inbound 直接被丢（用于测试）
         self._inbound_handler: InboundHandler | None = None
 
+        # async task：全局订阅 conn 集合（hello 带 subscribe_async_tasks=true 才加入）
+        # + inbound 直路由回调。任务列表是全局 UI 状态，不做 per-session 路由。
+        self._async_task_subscribers: set[ServerConnection] = set()
+        self._async_task_handler: AsyncTaskHandler | None = None
+
         # 每 session_key 一个 outbound consumer task（拉 output_q → 按 last_active_source 发）
         self._outbound_qs: dict[str, asyncio.Queue[StreamEvent | None]] = {}
         self._outbound_consumers: dict[str, asyncio.Task[None]] = {}
@@ -104,6 +120,26 @@ class RuntimeServer:
     def set_inbound_handler(self, handler: InboundHandler) -> None:
         """设置 inbound 派发回调。SessionManager 提供 `dispatch_inbound`。"""
         self._inbound_handler = handler
+
+    def set_async_task_handler(self, handler: AsyncTaskHandler) -> None:
+        """设置 async_task_cancel / async_task_list_query 的直路由回调（AsyncTaskManager）。"""
+        self._async_task_handler = handler
+
+    async def broadcast_async_task(self, ftype: str, data: dict[str, Any]) -> None:
+        """async_task_* 出站帧全局 fan-out：发给所有声明订阅的 conn。
+
+        data 是 AsyncTaskManager 产出的载荷；帧信封（v/seq/ts）在这里统一加盖，
+        seq 与普通出站帧共用同一单调计数器。
+        """
+        frame = _envelope(ftype, next(self._seq), data)
+        payload = json.dumps(frame, ensure_ascii=False, default=str)
+        for ws in list(self._async_task_subscribers):
+            try:
+                await ws.send(payload)
+            except Exception as e:
+                sys.stderr.write(f"[RuntimeServer] async task send error: {e}\n")
+                sys.stderr.flush()
+                self._async_task_subscribers.discard(ws)
 
     async def register_outbound_queue(self, session_key: str, output_q: asyncio.Queue[StreamEvent]) -> None:
         """注册 per-session output_q；RuntimeServer 启动 consumer task 按 last_active_source 路由。
@@ -184,6 +220,7 @@ class RuntimeServer:
         session_key = self._default_session_key
         source = self._default_source
         first_ev: InboundEvent | None = None
+        first_async: tuple[str, dict[str, Any]] | None = None
         try:
             raw = await asyncio.wait_for(ws.recv(), timeout=10.0)
         except (asyncio.TimeoutError, ConnectionClosed):
@@ -211,13 +248,18 @@ class RuntimeServer:
                 src = data.get("source")
                 if isinstance(src, str) and src:
                     source = src
+                # additive：声明订阅 async task 帧才加入（老客户端不发也能用）
+                if data.get("subscribe_async_tasks") is True:
+                    self._async_task_subscribers.add(ws)
             first_ev = None
         else:
-            first_ev = from_frame(
-                first_payload,
-                default_session_key=session_key,
-                default_source=source,
-            )
+            first_async = async_task_inbound_from_frame(first_payload)
+            if first_async is None:
+                first_ev = from_frame(
+                    first_payload,
+                    default_session_key=session_key,
+                    default_source=source,
+                )
 
         # 注册：按 source 索引；同 source 再连 replace 旧连接
         async with self._clients_lock:
@@ -242,6 +284,8 @@ class RuntimeServer:
         _log.info("sending hello to client: model=%s providers=%s", self._default_model, list(self._providers.keys()))
         await ws.send(json.dumps(hello, ensure_ascii=False, default=str))
 
+        if first_async is not None:
+            await self._dispatch_async_task(first_async)
         if first_ev is not None:
             await self._dispatch_inbound(first_ev)
 
@@ -251,6 +295,7 @@ class RuntimeServer:
             async with self._clients_lock:
                 if self._clients.get(source) is ws:
                     del self._clients[source]
+            self._async_task_subscribers.discard(ws)
 
     async def _recv_loop(self, ws: ServerConnection, session_key: str, source: str) -> None:
         try:
@@ -258,6 +303,11 @@ class RuntimeServer:
                 if isinstance(raw, (bytes, bytearray)):
                     raw = raw.decode("utf-8", errors="replace")
                 payload = decode(raw)
+                # async_task_* inbound 不指向 session，直路由 AsyncTaskManager
+                at = async_task_inbound_from_frame(payload)
+                if at is not None:
+                    await self._dispatch_async_task(at)
+                    continue
                 ev = from_frame(
                     payload,
                     default_session_key=session_key,
@@ -272,6 +322,11 @@ class RuntimeServer:
         except Exception as e:
             sys.stderr.write(f"[RuntimeServer] recv error: {e}\n")
             sys.stderr.flush()
+
+    async def _dispatch_async_task(self, at: tuple[str, dict[str, Any]]) -> None:
+        if self._async_task_handler is None:
+            return
+        await self._async_task_handler(at[0], at[1])
 
     async def _dispatch_inbound(self, ev: InboundEvent) -> None:
         if self._inbound_handler is None:

@@ -58,6 +58,7 @@ from core.protocol import (
     ToolEnd,
     ToolStart,
 )
+from core.protocol.wire_frames import FrameType
 
 
 _MAX_TOOL_OUTPUT_CHARS = 2000
@@ -105,6 +106,8 @@ class TerminalChannel:
     def __init__(self, session_key: str = "default", debug: bool = False) -> None:
         self._session_key = session_key
         self._queue: asyncio.Queue[InboundEvent] = asyncio.Queue()
+        # 原始上行帧（/cancel → async_task_cancel）；_runtime.pump_raw_inbound 消费
+        self.raw_outbound: asyncio.Queue[dict] = asyncio.Queue()
         self._stop = asyncio.Event()
         self._reader: asyncio.Task | None = None
         self.console = Console(file=_RichStdout())
@@ -172,6 +175,18 @@ class TerminalChannel:
             if text.lower() in ("exit", "quit"):
                 self._stop.set()
                 break
+            if text.startswith("/cancel "):
+                task_id = text[len("/cancel "):].strip()
+                if task_id:
+                    await self.raw_outbound.put({
+                        "v": 1,
+                        "type": FrameType.ASYNC_TASK_CANCEL,
+                        "seq": 0,
+                        "ts": time.time(),
+                        "data": {"task_id": task_id, "reason": "user"},
+                    })
+                    self.console.print(f"[dim]→ cancel {task_id}[/dim]")
+                continue
             await self._queue.put(
                 InboundEvent(
                     session_key=self._session_key,
@@ -238,6 +253,53 @@ class TerminalChannel:
             self._stop_spinner()
             self._write_final_metrics(event.metrics)
             self.console.print()
+
+    async def handle_raw_frame(self, frame: dict) -> None:
+        """async_task_* 帧 → 折叠打印（够用而非完美；完整流看 MonoDesk）。
+
+        terminal 是单线程 console，handler 在 ws recv loop 里直接打印——与 Rich
+        输出同管道，无跨线程问题。
+        """
+        ftype = frame.get("type")
+        if ftype == FrameType.ASYNC_TASK_CREATED:
+            d = frame.get("data") or {}
+            self._stop_spinner()
+            self.console.print(
+                f"[dim cyan][task {d.get('task_id', '?')}] {d.get('kind', 'subagent')}"
+                f" started: \"{d.get('description', '')}\"[/dim cyan]"
+            )
+        elif ftype == FrameType.ASYNC_TASK_EVENT:
+            d = frame.get("data") or {}
+            inner = d.get("event") or {}
+            task_id = d.get("task_id", "?")
+            if inner.get("type") == "tool_end":
+                ed = inner.get("data") or {}
+                result = ed.get("result") or {}
+                self.console.print(
+                    f"[dim][task {task_id}]   {ed.get('name', '?')}"
+                    f" · {ed.get('latency_ms', 0)}ms · exit {result.get('exit_code', '?')}[/dim]"
+                )
+            elif inner.get("type") == "error":
+                ed = inner.get("data") or {}
+                self.console.print(
+                    f"[red][task {task_id}]   error: {ed.get('msg', '?')}[/red]"
+                )
+            # token / reasoning / status 不打印（折叠语义：终态见 async_task_status）
+        elif ftype == FrameType.ASYNC_TASK_STATUS:
+            d = frame.get("data") or {}
+            status = d.get("status", "?")
+            dur = d.get("duration_sec") or 0.0
+            line = f"[task {d.get('task_id', '?')}] {status} in {dur:.0f}s"
+            if status == "failed" and d.get("error"):
+                line += f" — {d['error']}"
+            elif status in ("cancelled", "timed_out") and d.get("cancel_reason"):
+                line += f" ({d['cancel_reason']})"
+            elif status == "completed" and d.get("final_text"):
+                preview = d["final_text"].replace("\n", " ")[:200]
+                line += f" — {preview}"
+            style = "green" if status == "completed" else "red" if status == "failed" else "yellow"
+            self._stop_spinner()
+            self.console.print(f"[{style}]{line}[/{style}]")
 
     def _print_metric(self, m: dict) -> None:
         tokens = m.get("tokens") or {}
