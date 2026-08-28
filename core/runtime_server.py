@@ -331,6 +331,7 @@ class RuntimeServer:
         await self._async_task_handler(at[0], at[1])
 
     async def _dispatch_inbound(self, ev: InboundEvent) -> None:
+        _log.info("[inbound] type=%s session_key=%s source=%s", ev.kind, ev.session_key, ev.source)
         if self._inbound_handler is None:
             return
         await self._inbound_handler(ev)

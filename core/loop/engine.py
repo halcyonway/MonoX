@@ -126,6 +126,7 @@ class LoopEngine:
         async def pumper():
             while True:
                 ev = await input_queue.get()
+                _log.info("[pumper] session=%s ev.kind=%s event_type=%s", self._session_key, ev.kind, ev.event_type)
                 if ev.kind == "interrupt":
                     await interrupt_queue.put(ev)
                 else:
@@ -215,7 +216,9 @@ class LoopEngine:
         try:
             while True:
                 # C1：主循环每轮开头先扫一轮积压 interrupt
-                if take_interrupt() is not None:
+                intr_ev = take_interrupt()
+                if intr_ev is not None:
+                    _log.info("[engine] session=%s C1 interrupt taken", self._session_key)
                     await handle_interrupt()
                     continue
 
@@ -229,7 +232,9 @@ class LoopEngine:
                     # react 跑着：三方 race——sub_queue / interrupt 队列 / step 完成。
                     # interrupt 侧赢平局，保证 tool 长执行、LLM 卡流都可被立刻打断。
                     kind, payload = await _race_get(sub_queue, interrupt_queue, self._step_task)
+                    _log.info("[engine] session=%s race result kind=%s step_task=%s", self._session_key, kind, self._step_task)
                     if kind == "intr":
+                        _log.info("[engine] session=%s handling interrupt via race", self._session_key)
                         await handle_interrupt()
                         continue
                     if kind == "done":
