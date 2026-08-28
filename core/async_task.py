@@ -367,6 +367,9 @@ class AsyncTaskManager:
         terminal 检查丢掉 idle 信号。找不到 task / 已终态 / 正在 cancel → False（容错）。
         """
         task = self._tasks.get(task_id)
+        _log.info("[cancel] task_id=%s reason=%s task=%s status=%s cancelling=%s",
+                  task_id, reason, task.task_id if task else None,
+                  task.status if task else None, task_id in self._cancelling)
         if task is None or task.status in _TERMINAL or task_id in self._cancelling:
             return False
         self._cancelling.add(task_id)
@@ -377,9 +380,11 @@ class AsyncTaskManager:
                 await self._cancel_bash(task)
             else:
                 sl = self._session_manager.get_loop(task.child_session_key)
+                _log.info("[cancel] got sl=%s for child_sk=%s", sl is not None, task.child_session_key)
                 if sl is not None:
                     idle = asyncio.Event()
                     self._idle_events[task_id] = idle
+                    _log.info("[cancel] putting interrupt to child input_q child_sk=%s", task.child_session_key)
                     sl.input_q.put_nowait(InboundEvent(
                         session_key=task.child_session_key,
                         kind="interrupt",
@@ -388,17 +393,23 @@ class AsyncTaskManager:
                         event_type="async-task-cancel",
                         timestamp=self._time_fn(),
                     ))
+                    _log.info("[cancel] interrupt queued, waiting for idle child_sk=%s", task.child_session_key)
                     with contextlib.suppress(asyncio.TimeoutError):
                         await asyncio.wait_for(idle.wait(), timeout=IDLE_WAIT_SEC)
+                    _log.info("[cancel] idle wait done or timed out child_sk=%s", task.child_session_key)
                     self._idle_events.pop(task_id, None)
+                    _log.info("[cancel] destroying session child_sk=%s", task.child_session_key)
                     await self._session_manager.destroy_session(task.child_session_key)
+                    _log.info("[cancel] session destroyed child_sk=%s", task.child_session_key)
 
                 bridge = self._bridges.pop(task_id, None)
                 if bridge is not None:
                     bridge.stop()
         finally:
             self._cancelling.discard(task_id)
+        _log.info("[cancel] calling _finish task_id=%s status=%s", task_id, status)
         await self._finish(task, status=status)
+        _log.info("[cancel] _finish done task_id=%s", task_id)
         return True
 
     def get(self, task_id: str) -> AsyncTask | None:

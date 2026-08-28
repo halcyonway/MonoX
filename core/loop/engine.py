@@ -156,15 +156,25 @@ class LoopEngine:
 
         async def handle_interrupt() -> None:
             """step 跑着 → cancel 它；随后统一回 idle。"""
+            _log.info("[interrupt] handle_interrupt session=%s step_task=%s done=%s",
+                      self._session_key,
+                      self._step_task,
+                      self._step_task.done() if self._step_task else True)
             if self._step_task is not None and not self._step_task.done():
                 self._msgs_before = list(self._messages)
                 self._step_task.cancel()
                 try:
                     await asyncio.wait_for(self._step_task, timeout=5.0)
-                except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
-                    pass
+                    _log.info("[interrupt] step_task exited cleanly session=%s", self._session_key)
+                except asyncio.TimeoutError:
+                    _log.warning("[interrupt] step_task timed out after 5s, force-killing session=%s", self._session_key)
+                except asyncio.CancelledError:
+                    _log.info("[interrupt] step_task got CancelledError session=%s", self._session_key)
+                except Exception as e:
+                    _log.warning("[interrupt] step_task exception %s: %s session=%s", type(e).__name__, e, self._session_key)
             self._step_task = None
             await output_queue.put(StatusChange(state="idle"))
+            _log.info("[interrupt] handle_interrupt done, idle emitted session=%s", self._session_key)
 
         async def _race_get(a: asyncio.Queue, b: asyncio.Queue, step_t: asyncio.Task | None):
             """race 两条队列 + 可选 step task，interrupt 侧赢得抢占优先。

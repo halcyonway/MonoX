@@ -133,6 +133,8 @@ class RuntimeServer:
         """
         frame = _envelope(ftype, next(self._seq), data)
         payload = json.dumps(frame, ensure_ascii=False, default=str)
+        _log.info("[broadcast_async_task] ftype=%s subscribers=%d data_keys=%s",
+                  ftype, len(self._async_task_subscribers), list(data.keys()))
         for ws in list(self._async_task_subscribers):
             try:
                 await ws.send(payload)
