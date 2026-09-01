@@ -119,11 +119,18 @@ def tool_result_event_xml(call_id: str, result: ToolResult, *, tool: str | None 
 def _attachment_xml(f: File) -> str:
     """File → <attachment> element.
 
-    Wire protocol：File.content 存 url 字节（UTF-8 decode 得到 URL 字符串）。
-    这种情况下渲染为 url 属性而非 base64 body（节省 token，且 LLM 可直接访问）。
+    优先级：
+      1. File.path 字段（本地绝对路径，给音频等 skill 处理的附件用）
+      2. File.content 存 URL 字符串（http/https/file path，兼容历史格式）
+      3. 否则 base64 编码 File.content（真正的文件字节）
 
-    如果 content 不是有效 URL 字符串，则降级为 base64 编码（兼容旧格式）。
+    1/2 都渲染为 url 属性（不写 base64，节省 token，LLM 可直接调本地脚本）。
     """
+    # 优先：File.path 字段（音频 attachment 走这条）
+    if f.path:
+        head = _attrs({"name": f.name, "mime": f.mime, "url": f.path})
+        return f"<attachment{head} />"
+
     url_bytes = f.content or b""
     try:
         url_str = url_bytes.decode("utf-8")
@@ -154,7 +161,7 @@ User-side events:
   <event ts="1700000000.5" kind="user_input" channel="monodesk"
          event_type="user-input">
     user message body
-    <attachment name="screenshot.png" mime="image/png">base64-encoded-image-data...</attachment>
+    <attachment name="meeting.m4a" mime="audio/mp4" url="/Users/.../meeting.m4a" />
   </event>
   - `ts`: Unix seconds (float). Use to compute latency / ordering.
   - `kind`: user_input (interactive), command (slash command like /reset),
@@ -163,9 +170,13 @@ User-side events:
   - `channel`: source identifier (monodesk / terminal / async_task / etc.).
   - `event_type`: sub-classification (user-input / scheduled-task /
     async-task-result / ...).
-  - `<attachment>`: inline file/image embedded as base64. The `name` attribute is the
-    original filename or path; `mime` is the MIME type (e.g. `image/png`).
-    You can call `multimodalunderstand(attachment_url="/path/to/file")` to analyze it.
+  - `<attachment>`: file reference. `name` is original filename; `mime` is MIME
+    (e.g. `image/png`, `audio/mp4`); `url` is a local absolute path or HTTP URL
+    the file lives at. For images you can call
+    `multimodalunderstand(attachment_url="/path/to/file")` to analyze it.
+    For audio (and other skill-handleable files), call the matching skill
+    directly — e.g. `asr transcribe <path>`. Skills persist results locally so
+    you don't re-call the API for the same file.
 
 Tool-side events (in `role=tool` messages):
   <event kind="tool_result" call_id="c1" status="ok" exit_code="0"

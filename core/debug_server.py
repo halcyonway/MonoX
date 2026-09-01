@@ -246,6 +246,10 @@ class DebugServer:
         Content-Type 决定 MIME type（默认 image/png）。
         返回 saved file 的 HTTP URL（`http://host:port/debug/attachments/<uuid>.png`），
         前端 <img src> 直接用；multimodalunderstand tool 也用这个 URL（fetch + base64）。
+
+        音频走另一种语义：除了 HTTP url，还返回本地绝对 `path` 字段，方便
+        MonoDesk 把它直接塞进 ws frame 的 attachment.path，server 端 skill
+        （如 asr）能直接读本地文件处理，避免 HTTP 回环→重传字节的浪费。
         """
         root = self._attachments_root
         if root is None:
@@ -257,15 +261,37 @@ class DebugServer:
 
         # 从 Content-Type 提取 mime，e.g. "image/png" or "image/png; charset=..."
         mime = content_type.split(";")[0].strip() or "image/png"
-        # 常见 image 扩展名
+        # 常见 mime → 扩展名（image + audio 都要支持）
         ext_map = {
+            # image
             "image/png": ".png",
             "image/jpeg": ".jpg",
             "image/gif": ".gif",
             "image/webp": ".webp",
+            # audio（ASR 落地用）
+            "audio/mp4": ".m4a",       # iOS 录音、微信音频常见
+            "audio/x-m4a": ".m4a",
+            "audio/mpeg": ".mp3",
+            "audio/mp3": ".mp3",
+            "audio/wav": ".wav",
+            "audio/x-wav": ".wav",
+            "audio/wave": ".wav",
+            "audio/ogg": ".ogg",
+            "audio/aac": ".aac",
+            "audio/flac": ".flac",
+            "audio/x-flac": ".flac",
+            "audio/opus": ".opus",
         }
         ext = ext_map.get(mime, "")
         filename = f"{uuid.uuid4().hex}{ext}"
+
+        # kind：image/audio/other —— MonoDesk 据此渲染 chip、决定是否给 path 字段
+        if mime.startswith("image/"):
+            kind = "image"
+        elif mime.startswith("audio/"):
+            kind = "audio"
+        else:
+            kind = "other"
 
         attachments_dir = root / "attachments"
         try:
@@ -276,19 +302,21 @@ class DebugServer:
             await _send_json(writer, 500, {"error": f"write failed: {exc}"}, extra_cors=cors)
             return
 
-        _log.info("attachment saved: %s (%d bytes, mime=%s)", saved_path, len(body_bytes), mime)
+        _log.info("attachment saved: %s (%d bytes, mime=%s, kind=%s)", saved_path, len(body_bytes), mime, kind)
         # URL 用绝对 HTTP（不是本地路径）—— 前端 <img> 跨 origin 加载 file:// 被 CORS 拦；
         # MiniMax vision API 也拿不到 localhost 本地文件。HTTP URL 三方通用。
         url = f"http://{self._cfg.host}:{self._cfg.port}/debug/attachments/{filename}"
-        await _send_json(
-            writer, 200,
-            {
-                "url": url,
-                "name": filename,
-                "mime": mime,
-            },
-            extra_cors=cors,
-        )
+        payload: dict[str, Any] = {
+            "url": url,
+            "name": filename,
+            "mime": mime,
+            "kind": kind,
+        }
+        # 音频额外给本地绝对路径：MonoDesk 把它原封塞进 ws frame 的 attachment.path，
+        # server 端 skill（asr）直接读本地文件处理。避免 HTTP 回环重新拉字节。
+        if kind == "audio":
+            payload["path"] = str(saved_path)
+        await _send_json(writer, 200, payload, extra_cors=cors)
 
     async def _handle_attachment_serve(
         self, path: str, writer: asyncio.StreamWriter, cors: bool,
@@ -328,6 +356,13 @@ class DebugServer:
             ".jpeg": "image/jpeg",
             ".gif": "image/gif",
             ".webp": "image/webp",
+            ".m4a": "audio/mp4",
+            ".mp3": "audio/mpeg",
+            ".wav": "audio/wav",
+            ".ogg": "audio/ogg",
+            ".aac": "audio/aac",
+            ".flac": "audio/flac",
+            ".opus": "audio/opus",
         }
         mime = ext_map.get(file_path.suffix.lower(), "application/octet-stream")
         await _send_bytes(writer, 200, mime, body, extra_cors=cors)
