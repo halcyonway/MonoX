@@ -309,15 +309,16 @@ def _spawn_feishu(cfg: Config) -> subprocess.Popen | None:
     for ch in cfg.multi_channel.channels:
         if ch.kind != "feishu":
             continue
-        app_id = ch.options.get("app_id", "")
-        app_secret = ch.options.get("app_secret", "")
+        feishu_cfg = ch.channel_raw.get("feishu", {})
+        app_id = feishu_cfg.get("app_id", "")
+        app_secret = feishu_cfg.get("app_secret", "")
         if not app_id or not app_secret:
             _log.warning(
                 "[feishu] app_id/app_secret 为空，跳过启动；请在 config 的 "
                 '[[channels]] kind="feishu" 里填真实凭据'
             )
             return None
-        allowed = ch.options.get("allowed_chats", [])
+        allowed = feishu_cfg.get("allowed_chats", [])
         cmd = [
             sys.executable, "-m", "extensions.channels.feishu",
             f"--runtime-url=ws://{cfg.server.host}:{cfg.server.port}",

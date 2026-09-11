@@ -1,83 +1,42 @@
-# MonoX configuration example
-# Copy to config.toml and edit.
+# MonoX Configuration Template
+# Copy this to config.toml and fill in your values.
 
 session_key = "default"
 
-# channels_default: default target channel when agent output has no <send> tag.
-# MUST be defined before [llm] section (TOML requirement).
 channels_default = "feishu"
 
 [llm]
-api_base = "https://api.openai.com/v1"
-api_key = "${OPENAI_API_KEY}"
-model = "gpt-4"
-timeout = 60
-provider_name = "openai"
-
-# [llm.options]
-# temperature = 0.7
-# max_tokens = 4096
-
-# [llm.extra_params]
-# reasoning_split = true
-
-# [llm.custom]
-# your_custom_field = "value"
-
-# ============================================================
-# [providers] 模型 provider 配置
-# ============================================================
-# key=自定义 provider 名，value=真实连接配置。
-# 真实凭证只引用环境变量，不写死在文件里。
-#
-# 使用方式：user_input 的 meta.model_provider 指定 provider 名，
-# LlmProxy 查 providers[provider_name] 得到 base_url / api_key / model_real_name。
-#
-# 如无需多 provider 切换，可不配置本节。
-
-[providers.openai]
-model_real_name = "gpt-4o-mini"
-base_url = "https://api.openai.com/v1"
-apikey_env = "OPENAI_API_KEY"
-timeout = 60
-
-[providers.claude]
-model_real_name = "claude-sonnet-4-20250514"
-base_url = "https://api.anthropic.com/v1"
-apikey_env = "ANTHROPIC_API_KEY"
+api_base = "https://api.minimaxi.com/v1"
+api_key = "${MINIMAX_API_KEY}"
+model = "MiniMax-M2.7"
 timeout = 120
-# extra_params = { thinking_max_tokens = 16000 }
+provider_name = "minimax"
 
-# Required independent compression model (L2 conversation summarization).
-# 这里填占位值即可；可填主模型同款，或换一个更便宜的模型。
-# Missing fields fall back to the main [llm] values.
+[llm.extra_params]
+reasoning_split = true
+
+[providers.official.MiniMax-M2.7]
+model_real_name = "MiniMax-M2.7"
+base_url = "https://api.minimaxi.com/v1"
+apikey_env = "MINIMAX_API_KEY"
+timeout = 240
+
+[providers.official.MiniMax-M3]
+model_real_name = "MiniMax-M3"
+base_url = "https://api.minimaxi.com/v1"
+apikey_env = "MINIMAX_API_KEY"
+timeout = 240
+
+[providers.official.GLM-5.3-Flash]
+model_real_name = "GLM-5.3-Flash"
+base_url = "https://open.bigmodel.cn/api/paas/v4/"
+apikey_env = "ZHIPU_API_KEY"
+timeout = 240
+
 [llm.compression]
-model = "your-compression-model"
-
-[llm.compression.options]
-temperature = 0.2
-
-# ============================================================
-# [[channels]] multi-channel configuration
-# ============================================================
-# New format, takes priority over [channel] single-channel config.
-# channels_default must appear before [llm] (TOML requirement).
-# Per-channel config lives in [channels.<kind>] sub-table.
-
-# Single channel example:
-# [[channels]]
-# kind = "terminal"
-
-# Multi-channel example (terminal for input + feishu for output):
-# [[channels]]
-# kind = "terminal"
-#
-# [[channels]]
-# kind = "feishu"
-# [channels.feishu]
-# app_id     = "cli_xxxxxxxxxxxxxxxx"
-# app_secret = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-# allowed_chats = []
+api_base = "https://api.minimaxi.com/v1"
+api_key = "${MINIMAX_API_KEY}"
+model = "MiniMax-Embedding-256"
 
 [[channels]]
 kind = "terminal"
@@ -86,38 +45,14 @@ kind = "terminal"
 kind = "feishu"
 
 [channels.feishu]
-app_id     = "cli_xxxxxxxxxxxxxxxx"
-app_secret = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+app_id = "${FEISHU_APP_ID}"
+app_secret = "${FEISHU_APP_SECRET}"
 allowed_chats = []
 
-# Desktop client channel (MonoDesk) — WebSocket server for the desktop client:
-# [[channels]]
-# kind  = "monodesk"
-# host  = "127.0.0.1"
-# port  = 8765
-# model = "gpt-4"   # optional; echoed in the hello frame for the client's status bar
-
-# ============================================================
-# [sandbox] file system paths
-# ============================================================
 [sandbox]
 workspace_root = "./.monox/workspace"
 memory_root    = "./.monox/memory"
 state_root     = "./.monox/state"
 traces_root    = "./.monox/traces"
 skills_root    = "./.monox/skills"
-# 公共 skill 库（git-tracked）。run.py 启动时把这里缺失的 skill 整目录拷到 skills_root。
-# 用户改 skill 必须改这里（不是 .monox/skills/），详见 spec/ARCHITECTURE.md 9.1
-extensions_skills_dir = "./extensions/skills"
 tmp_root       = "./.monox/tmp"
-# L1 skill 自动注入 system prompt 的上限；超限时按字典序截断并 warn
-skills_max_l1  = 50
-
-# ============================================================
-# [async_task] 异步任务（subagent）配置
-# ============================================================
-# 见 spec/requirements/async-task.md。不配置时用下面的默认值。
-# [async_task]
-# default_timeout_sec = 1800.0   # 默认 30min
-# min_timeout_sec     = 10.0
-# max_timeout_sec     = 7200.0   # 2h hard cap
