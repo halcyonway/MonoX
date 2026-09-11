@@ -15,6 +15,10 @@ class File:
     name: str
     content: bytes = b""
     mime: str = "application/octet-stream"
+    # 本地绝对路径（如果 attachment 是文件落地到本地的，比如音频）。
+    # 优先级：path > content（content 里存 URL 字符串是历史兼容路径，
+    # event_format 会先看 path 再看 content）。
+    path: str | None = None
 
 
 # ---------- Gateway → Loop ----------

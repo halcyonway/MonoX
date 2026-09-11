@@ -116,7 +116,19 @@ def _decode_bytes(b: bytes) -> str:
 
 
 def _file_to_dict(f: File) -> dict[str, Any]:
-    return {"name": f.name, "mime": f.mime, "content": _decode_bytes(f.content)}
+    d: dict[str, Any] = {"name": f.name, "mime": f.mime, "content": _decode_bytes(f.content)}
+    # path + kind 是 audio attachment 等本地落盘文件专用的字段
+    # （image attachment 不会填，wire 兼容）。
+    if f.path is not None:
+        d["path"] = f.path
+        # kind 推断：mime audio/* → audio；image/* → image；否则 other
+        if f.mime.startswith("audio/"):
+            d["kind"] = "audio"
+        elif f.mime.startswith("image/"):
+            d["kind"] = "image"
+        else:
+            d["kind"] = "other"
+    return d
 
 
 def _tool_result_to_dict(result: ToolResult) -> dict[str, Any]:
@@ -398,8 +410,10 @@ def from_frame(
         if not isinstance(sk, str) or not sk:
             sk = default_session_key
 
-        # attachments: list of {url, name?, mime?} → tuple[File, ...]
-        # MonoDesk 上传文件到本地路径后，通过 ws 帧发送 url 过来。
+        # attachments: list of {url, name?, mime?, path?, kind?} → tuple[File, ...]
+        # MonoDesk 上传文件到本地路径后，通过 ws 帧发送 url/path 过来。
+        # - image 类：只填 url（HTTP URL 给 vision API）
+        # - audio 类：url + path（HTTP 用来 serve 给前端播放，path 给 server skill 处理）
         raw_attachments: list[dict[str, Any]] = data.get("attachments") or []
         attachments: list[File] = []
         for a in raw_attachments:
@@ -407,11 +421,20 @@ def from_frame(
                 continue
             url = a.get("url")
             if not isinstance(url, str) or not url:
+                # 没 url 也不算 attachment（兼容老 client）
                 continue
+            mime = a.get("mime")
+            if not isinstance(mime, str) or not mime:
+                # 没 mime 时按 kind 猜：audio → audio/mp4；image → image/png
+                kind = a.get("kind")
+                mime = "audio/mp4" if kind == "audio" else "image/png"
+            path_raw = a.get("path")
+            path = path_raw if isinstance(path_raw, str) and path_raw else None
             attachments.append(File(
                 name=a.get("name") or url,
                 content=url.encode("utf-8"),
-                mime=a.get("mime", "image/png"),
+                mime=mime,
+                path=path,
             ))
 
         return InboundEvent(
@@ -460,10 +483,20 @@ def inbound_to_frame(event: InboundEvent, seq: int = 0) -> dict[str, Any] | None
     """
     if event.kind == "message":
         # attachments: File.content 存 url 字节，encode 成字符串透传
+        # audio 类 File 有 path 字段，原样透传（audio skill 直接读本地文件）
         attachments_data: list[dict[str, Any]] = []
         for f in event.attachments:
             url = f.content.decode("utf-8") if f.content else ""
-            attachments_data.append({"url": url, "name": f.name, "mime": f.mime})
+            entry: dict[str, Any] = {"url": url, "name": f.name, "mime": f.mime}
+            if f.path is not None:
+                entry["path"] = f.path
+                if f.mime.startswith("audio/"):
+                    entry["kind"] = "audio"
+                elif f.mime.startswith("image/"):
+                    entry["kind"] = "image"
+                else:
+                    entry["kind"] = "other"
+            attachments_data.append(entry)
         return _envelope(
             FrameType.USER_INPUT,
             seq,
@@ -538,6 +571,7 @@ def frame_to_stream_event(payload: Any) -> StreamEvent | None:
                 name=a.get("name", ""),
                 content=(a.get("content") or "").encode("utf-8"),
                 mime=a.get("mime", "application/octet-stream"),
+                path=(a.get("path") if isinstance(a.get("path"), str) else None),
             )
             for a in artifacts_raw if isinstance(a, dict)
         )
