@@ -2,6 +2,10 @@
   <img src="logo.svg" alt="MonoX" width="128"/>
 </p>
 
+<p align="center">
+  <strong>English</strong> · <a href="README_zh.md">中文</a>
+</p>
+
 # MonoX
 
 **A minimal, self-hosted Agent Runtime.** Modular by design — swap any component without touching the rest.
