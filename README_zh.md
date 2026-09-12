@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="logo_zh.svg" alt="MonoX" width="128"/>
+</p>
+
 # MonoX
 
 **一个极简的自托管 Agent Runtime。** 模块化设计 — 任意组件均可替换，不影响其他部分。
@@ -49,19 +53,19 @@ flowchart TB
     Session --> Server
     Health --> Session
 
-    style Core fill:#0c1f2e,stroke:#1d4ed8,color:#93c5fd
-    style Extensions fill:#1a1f2e,stroke:#6366f1,color:#c4b5fd
-    style Server fill:#0c2a1a,stroke:#22c55e,color:#86efac
-    style Loop fill:#1a2540,stroke:#3b82f6,color:#93c5fd
-    style LLMP fill:#1a2540,stroke:#3b82f6,color:#93c5fd
-    style Sandbox fill:#1a2540,stroke:#3b82f6,color:#93c5fd
-    style Memory fill:#1a2540,stroke:#3b82f6,color:#93c5fd
-    style Session fill:#1a2540,stroke:#3b82f6,color:#93c5fd
-    style Health fill:#0c2a1a,stroke:#22c55e,color:#86efac
-    style Protocol fill:#1a2540,stroke:#60a5fa,color:#bfdbfe
-    style Channels fill:#1f1f35,stroke:#8b5cf6,color:#c4b5fd
-    style Skills fill:#1f1f35,stroke:#8b5cf6,color:#c4b5fd
-    style Other fill:#1f1f35,stroke:#8b5cf6,color:#c4b5fd
+    style Core fill:#e8f2fc,stroke:#1d4ed8,color:#1e3a5f
+    style Extensions fill:#f3effe,stroke:#6366f1,color:#4c1d95
+    style Server fill:#e8faf0,stroke:#22c55e,color:#166534
+    style Loop fill:#e8f0fd,stroke:#3b82f6,color:#1e3a5f
+    style LLMP fill:#e8f0fd,stroke:#3b82f6,color:#1e3a5f
+    style Sandbox fill:#e8f0fd,stroke:#3b82f6,color:#1e3a5f
+    style Memory fill:#e8f0fd,stroke:#3b82f6,color:#1e3a5f
+    style Session fill:#e8f0fd,stroke:#3b82f6,color:#1e3a5f
+    style Health fill:#e8faf0,stroke:#22c55e,color:#166534
+    style Protocol fill:#e8f0fd,stroke:#60a5fa,color:#1e3a5f
+    style Channels fill:#f5f0ff,stroke:#8b5cf6,color:#4c1d95
+    style Skills fill:#f5f0ff,stroke:#8b5cf6,color:#4c1d95
+    style Other fill:#f5f0ff,stroke:#8b5cf6,color:#4c1d95
 ```
 
 ## 快速开始
