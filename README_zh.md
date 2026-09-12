@@ -12,8 +12,10 @@
 
 MonoX 以长期运行的 Python 进程运行，通过 WebSocket 通信。Channel、Skills 以及其他 harness 扩展均位于 `extensions/`，与核心完全解耦。
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![PyPI Version](https://img.shields.io/pypi/v/monox?color=3b82f6)](https://pypi.org/project/monox/)
+<p align="center">
+  [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+  [![PyPI Version](https://img.shields.io/pypi/v/monox?color=3b82f6)](https://pypi.org/project/monox/)
+</p>
 
 ## 特性
 

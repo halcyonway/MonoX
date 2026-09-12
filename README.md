@@ -12,8 +12,10 @@
 
 MonoX runs as a long-lived Python process speaking WebSocket. Channels, skills, and other harness extensions live in `extensions/` — completely decoupled from the core.
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![PyPI Version](https://img.shields.io/pypi/v/monox?color=3b82f6)](https://pypi.org/project/monox/)
+<p align="center">
+  [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+  [![PyPI Version](https://img.shields.io/pypi/v/monox?color=3b82f6)](https://pypi.org/project/monox/)
+</p>
 
 ## Features
 
