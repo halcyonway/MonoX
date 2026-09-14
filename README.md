@@ -1,211 +1,137 @@
-<!-- English -->
 # MonoX
 
-**A minimal, self-hosted Agent Runtime.** Modular by design — swap any component without touching the rest.
+A minimal, self-use Agent Runtime. Code it, scratch it, keep it lean.
 
-MonoX runs as a long-lived Python process that speaks WebSocket. Channels (terminal, Feishu, desktop UI, etc.) connect as clients. The core knows nothing about specific channel implementations.
+**系统 = 模块 + 协议。** Runtime 进程跑核心（协议 + ReAct 引擎 + 存储/执行抽象），channel 作为 feature 通过协议接入。
 
-## Features
+[MonoDesk](https://github.com/halcyonway/MonoDesk) 是桌面 UI channel（独立仓库，直接 ws 连 RuntimeServer，不走 in-process adapter）。
 
-- **Protocol-first architecture** — Cross-module boundaries use `Protocol` + frozen dataclasses. Swap an implementation without changing anything else.
-- **Multi-channel, multi-session** — One runtime, many channels. Sessions are isolated; share state via `last_active_source` fan-out.
-- **Tool-augmented ReAct loop** — Extensible tool registry. Bash execution, memory, skills — all through the same protocol.
-- **Hot-swappable adapters** — Channels live in `extensions/`. Rewrite any channel without touching the core.
-- **Long-term memory** — File-based storage with embedding-based retrieval.
+## Design philosophy
 
-## Architecture
+- **Stable core, swappable adapters** — `core/` is the zero-UI / zero-IM / zero-LLM-SDK kernel. `extensions/` holds adapters that can be rewritten freely. `run.py` is the assembly layer.
+- **Protocol-first, duck-typed** — Cross-module boundaries use `Protocol` + frozen dataclasses. If it quacks like the protocol, it IS the protocol. Swapping an implementation touches nothing else.
+- **Runtime is the WS hub** — `RuntimeServer` is a plain ws server on :8765. Channels connect as clients; the runtime knows nothing about specific channel protocols.
+- **Multi-session in one process** — Multiple channels share the main session via `last_active_source` fan-out, or use independent `session_key`s.
+- **Config-driven** — `config.toml` owns all connection params. `run.py` reads only LLM / server / sandbox sections.
 
-![MonoX Architecture](spec/architecture.png)
-
-```
-┌─────────────────────────────────── Runtime ──────────────────────────────────┐
-│  ┌─────────────┐    ┌────────────┐    ┌─────────────┐    ┌───────────────┐  │
-│  │ LoopEngine  │───▶│  Protocol  │◀───│  LLMProxy   │    │  Sandbox      │  │
-│  │ (ReAct)     │    │  (events)  │    │  (stream)   │    │  (bash exec)  │  │
-│  └─────────────┘    └────────────┘    └─────────────┘    └───────────────┘  │
-│         │                 ▲                                                    │
-│         ▼                 │                 ┌───────────────┐                 │
-│  ┌─────────────┐    ┌────────────┐         │  Memory       │                 │
-│  │  SessionMgr │◀──▶│RuntimeServer│◀──────▶│  (FsMemory)   │                 │
-│  │ (multi-sk)  │    │  :8765/ws  │         └───────────────┘                 │
-│  └─────────────┘    └────────────┘                                              │
-└───────────────────────────────────────────────────────────────────────────────┘
-         ▲
-         │ ws :8765
-  ┌──────┴──────┐
-  │  Channels   │
-  │ terminal    │
-  │ feishu      │
-  │ textual     │
-  │ MonoDesk    │
-  └─────────────┘
-```
-
-## Quick Start
-
-```bash
-# 1. Install dependencies
-./scripts/install.sh
-
-# 2. Configure — copy the template and fill in your keys
-cp config.example.toml config.toml
-# Edit config.toml: set api_base, api_key, model
-
-# 3. Start the runtime
-uv run python run.py          # starts ws server on :8765, health on :8767
-
-# 4. Connect a channel
-uv run python -m extensions.channels.terminal    # built-in terminal TUI
-
-# Check health
-curl http://127.0.0.1:8767/health
-```
-
-## Configuration
-
-All settings live in `config.toml`. Sensitive values use environment variable substitution:
-
-| Variable | Description |
-|---|---|
-| `MINIMAX_API_KEY` | MiniMax API key |
-| `ZHIPU_API_KEY` | Zhipu GLM API key |
-| `FEISHU_APP_ID` | Feishu/Lark app ID |
-| `FEISHU_APP_SECRET` | Feishu/Lark app secret |
-
-## Project Layout
-
-```
-core/                    # Stable kernel — zero UI, zero channel SDK
-├── protocol/            #   Event schemas (frozen dataclasses)
-├── loop/                #   ReAct engine + tool registry
-├── llm_proxy/           #   OpenAI-compatible streaming
-├── sandbox/             #   Bash execution
-├── memory/              #   Long-term memory (FsMemoryStore)
-├── runtime_server.py    #   WebSocket server (:8765)
-├── session_manager.py   #   Multi-session management
-└── config.py            #   TOML config loader
-extensions/              # Swappable adapters
-├── channels/            #   terminal / feishu / textual
-└── skills/              #   Skill definitions (LLM-readable)
-run.py                   # Assembly entry point
-config.toml              # Runtime configuration
-```
-
-## Channels
-
-| Channel | Description |
-|---|---|
-| `terminal` | Stdio-based TUI |
-| `feishu` | Feishu/Lark bot |
-| `textual` | Textual full-screen TUI |
-| `MonoDesk` | [Desktop UI](https://github.com/halcyonway/MonoDesk) |
-
-## License
-
-MIT
-
----
-
-<!-- 中文 -->
-# MonoX
-
-**一个极简的自托管 Agent Runtime。** 模块化设计 — 任意组件均可替换，不影响其他部分。
-
-MonoX 以长期运行的 Python 进程运行，通过 WebSocket 通信。Channel（终端、飞书、桌面 UI 等）作为客户端连接。核心内核对具体 channel 实现一无所知。
-
-## 特性
-
-- **协议优先架构** — 跨模块边界使用 `Protocol` + 不可变 dataclass。替换实现不影响其他模块。
-- **多 Channel、多 Session** — 一个 Runtime，多个 Channel。Session 相互隔离，通过 `last_active_source` 共享状态。
-- **工具增强的 ReAct 循环** — 可扩展的工具注册表。Bash 执行、记忆、Skills 均通过同一协议。
-- **热插拔适配器** — Channel 位于 `extensions/`，重写任意 Channel 不触及核心。
-- **长期记忆** — 基于文件的存储，支持 embedding 检索。
+Full design: `spec/ARCHITECTURE.md` (§2 overview / §6 core modules / §9 extensions / §12 multi-session).
 
 ## 架构
 
-```
-┌─────────────────────────────────── Runtime ──────────────────────────────────┐
-│  ┌─────────────┐    ┌────────────┐    ┌─────────────┐    ┌───────────────┐  │
-│  │ LoopEngine  │───▶│  Protocol  │◀───│  LLMProxy   │    │  Sandbox      │  │
-│  │ (ReAct)     │    │  (events)  │    │  (stream)   │    │  (bash exec)  │  │
-│  └─────────────┘    └────────────┘    └─────────────┘    └───────────────┘  │
-│         │                 ▲                                                    │
-│         ▼                 │                 ┌───────────────┐                 │
-│  ┌─────────────┐    ┌────────────┐         │  Memory       │                 │
-│  │  SessionMgr │◀──▶│RuntimeServer│◀──────▶│  (FsMemory)   │                 │
-│  │ (multi-sk)  │    │  :8765/ws  │         └───────────────┘                 │
-│  └─────────────┘    └────────────┘                                              │
-└───────────────────────────────────────────────────────────────────────────────┘
-         ▲
-         │ ws :8765
-  ┌──────┴──────┐
-  │  Channels   │
-  │ terminal    │
-  │ feishu      │
-  │ textual     │
-  │ MonoDesk    │
-  └─────────────┘
+```mermaid
+graph TB
+    subgraph Core["core/ (stable kernel)"]
+        Protocol["protocol/<br/>events + dataclasses"]
+        Loop["loop/<br/>ReAct engine + tools"]
+        LLMP["llm_proxy/<br/>OpenAI stream"]
+        Sandbox["sandbox/<br/>bash exec"]
+        Memory["memory/<br/>long-term memory"]
+        Server["runtime_server/<br/>ws server :8765"]
+        Session["session_manager/<br/>multi-session + idle"]
+        Health["health_server/<br/>:8767"]
+    end
+
+    subgraph Extensions["extensions/ (swappable adapters)"]
+        Channels["channels/<br/>in-process:<br/>terminal / feishu / textual_chat"]
+        Skills["skills/<br/>(no built-in skills)"]
+    end
+
+    Run["run.py<br/>assembly"]
+
+    Loop --> Protocol
+    LLMP --> Protocol
+    Sandbox --> Protocol
+    Memory --> Protocol
+    Server --> Protocol
+    Session --> Server
+    Health --> Session
+
+    Channels -.RuntimeWSClient.-> Server
+    Skills -.-> Loop
+
+    Run --> Core
+    Run --> Channels
+
+    classDef core fill:#e8f4f8,stroke:#333,stroke-width:2px
+    classDef ext fill:#fdf3e7,stroke:#333,stroke-width:1px
+    classDef run fill:#f0f0f0,stroke:#555
+    class Protocol,Loop,LLMP,Sandbox,Memory,Server,Session,Health core
+    class Channels,Skills ext
+    class Run run
 ```
 
-## 快速开始
+> 桌面 UI（MonoDesk）不通过 in-process channel 接入 —— 它走外部 ws client 直接连 :8765，
+  因为桌面 UI 跟 Runtime 不在同一进程（用户在 Mac/Win/Linux 桌面端跑 UI，本地跑 Runtime）。
+ 协议一样，进程模型不同。
+
+## Quick start
 
 ```bash
-# 1. 安装依赖
+# 1. Prepare
 ./scripts/install.sh
 
-# 2. 配置 — 复制模板并填写密钥
-cp config.example.toml config.toml
-# 编辑 config.toml：设置 api_base、api_key、model
+# 2. Configure
+export MINIMAX_API_KEY=eyJ...
+# Edit config.toml: api_base / api_key / model
 
-# 3. 启动 Runtime
-uv run python run.py          # 启动 ws server :8765，health :8767
+# 3. Start Runtime（启 ws server :8765）
+uv run python run.py
 
-# 4. 连接 Channel
-uv run python -m extensions.channels.terminal    # 内置终端 TUI
+# 4. Connect a channel
+# 4a. terminal TUI（in-process channel，独立进程）
+uv run python -m extensions.channels.terminal
 
-# 检查状态
+# 4b. MonoDesk 桌面 UI（外部 ws client，独立仓库）
+# 见 https://github.com/halcyonway/MonoDesk
+
+# 5. Check Runtime status
 curl http://127.0.0.1:8767/health
-```
-
-## 配置
-
-所有设置在 `config.toml` 中。敏感值使用环境变量：
-
-| 变量 | 说明 |
-|---|---|
-| `MINIMAX_API_KEY` | MiniMax API 密钥 |
-| `ZHIPU_API_KEY` | 智谱 GLM API 密钥 |
-| `FEISHU_APP_ID` | 飞书应用 ID |
-| `FEISHU_APP_SECRET` | 飞书应用密钥 |
-
-## 项目结构
-
-```
-core/                    # 稳定内核 — 零 UI、零 channel SDK
-├── protocol/            #   事件 schema（不可变 dataclass）
-├── loop/                #   ReAct 引擎 + 工具注册表
-├── llm_proxy/           #   OpenAI 兼容流式
-├── sandbox/             #   Bash 执行
-├── memory/              #   长期记忆（FsMemoryStore）
-├── runtime_server.py    #   WebSocket 服务端（:8765）
-├── session_manager.py   #   多 session 管理
-└── config.py            #   TOML 配置加载器
-extensions/              # 可插拔适配器
-├── channels/            #   terminal / feishu / textual
-└── skills/              #   Skill 定义（LLM 可读）
-run.py                   # 装配入口
-config.toml              # Runtime 配置
 ```
 
 ## Channels
 
-| Channel | 说明 |
+| Channel | Description | 进程模型 |
+|---|---|---|
+| terminal | stdio TUI | in-process（独立进程跑 RuntimeWSClient 连 :8765） |
+| feishu | lark-oapi | in-process（独立进程跑 RuntimeWSClient 连 :8765） |
+| textual | textual full-screen TUI | in-process（独立进程跑 RuntimeWSClient 连 :8765） |
+| **monodesk** | 桌面 UI（[MonoDesk](https://github.com/halcyonway/MonoDesk)） | **外部**（独立 App，ws 连 :8765） |
+
+> 旧版本 `extensions/channels/monodesk/`（独立进程 ws server :8766）已废弃并删除。
+> 桌面 UI 现在跟其他 channel 用同一套 ws 协议，更简单（少一层端口、多 session 共用更顺）。
+
+## Layout
+
+```
+core/                 # stable kernel
+├── protocol/         #   events + ws frame schema
+├── loop/             #   ReAct engine + tool registry
+├── llm_proxy/        #   OpenAI-compatible stream
+├── sandbox/          #   bash exec
+├── memory/           #   long-term memory (FsMemoryStore)
+├── runtime_server.py #   ws server (:8765) — 唯一对外入口
+├── session_manager.py #  multi-session + idle
+├── health_server.py  #   HTTP :8767
+└── config.py         #   config.toml loader
+extensions/           # adapters (rewritable)
+├── channels/         #   terminal / feishu / textual_chat (in-process RuntimeWSClient)
+└── skills/           #   SKILL.md (LLM-readable)
+run.py                # assembly entry
+config.toml           # runtime config
+spec/                 # design docs (ARCHITECTURE.md + requirements/)
+```
+
+## Test
+
+```bash
+uv run pytest tests/ -q
+```
+
+## Feature modules
+
+| Feature | Spec |
 |---|---|
-| `terminal` | 标准输入输出 TUI |
-| `feishu` | 飞书机器人 |
-| `textual` | Textual 全屏 TUI |
-| `MonoDesk` | [桌面 UI](https://github.com/halcyonway/MonoDesk) |
-
-## License
-
-MIT
+| 1. 多 channel（独立进程 + 多 session 共享） | [`spec/requirements/multi-session.md`](spec/requirements/multi-session.md) |
+| 2. 上下文压缩（L1/L2） | [`spec/requirements/context-compression.md`](spec/requirements/context-compression.md) |
+| 3. 长期记忆（Memory.md + notes/） | [`spec/requirements/memory.md`](spec/requirements/memory.md) |
+| 4. 事件建模（frozen dataclass + XML 包装） | [`spec/requirements/event-wrapper.md`](spec/requirements/event-wrapper.md) |
