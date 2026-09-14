@@ -1,11 +1,10 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 50">
-  <defs>
-    <linearGradient id="grad" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" style="stop-color:#3b82f6"/>
-      <stop offset="100%" style="stop-color:#8b5cf6"/>
-    </linearGradient>
-  </defs>
-  <rect width="200" height="50" rx="10" fill="#0f1923"/>
-  <text x="28" y="35" font-family="SF Pro Display, Helvetica Neue, Arial, sans-serif" font-size="28" font-weight="700" fill="url(#grad)">X</text>
-  <text x="52" y="34" font-family="SF Pro Display, Helvetica Neue, Arial, sans-serif" font-size="18" font-weight="600" fill="#e2e8f0" letter-spacing="2">MONOX</text>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 360 90" fill="none">
+  <!-- Geometric X mark with overlapping diamonds -->
+  <g transform="translate(25, 25)">
+    <path d="M 0 20 L 20 0 L 40 20 L 20 40 Z" fill="#1d4ed8" opacity="0.9"/>
+    <path d="M 12 20 L 28 4 L 44 20 L 28 36 Z" fill="#3b82f6" opacity="0.7"/>
+    <path d="M 20 20 m -6 0 a 6 6 0 1 0 12 0 a 6 6 0 1 0 -12 0" fill="#8b5cf6"/>
+  </g>
+  <text x="90" y="55" font-family="-apple-system, SF Pro Display, Helvetica Neue, Arial, sans-serif" font-size="44" font-weight="800" fill="#0f172a" letter-spacing="-1">MonoX</text>
+  <text x="92" y="78" font-family="ui-monospace, SF Mono, Menlo, monospace" font-size="12" font-weight="500" fill="#1d4ed8" letter-spacing="3">RUNTIME · v1</text>
 </svg>

@@ -1,18 +1,20 @@
-<p align="center">
-  <img src="logo.svg" alt="MonoX" width="128"/>
-</p>
+<div align="center">
 
-<p align="center">
-  <a href="README.md">English</a> · <strong>中文</strong>
-</p>
+<img src="logo.svg" alt="MonoX" width="280"/>
+
+[English](README.md) · **中文**
+
+[![License](https://img.shields.io/github/license/halcyonway/MonoX?style=for-the-badge&color=1d4ed8)](LICENSE)
+[![Python](https://img.shields.io/badge/Python-3.11+-1d4ed8?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org)
+[![WebSocket](https://img.shields.io/badge/WebSocket-Native-8b5cf6?style=for-the-badge&logo=socket.io&logoColor=white)](https://github.com/halcyonway/MonoX)
+
+</div>
 
 # MonoX
 
 **一个极简的自托管 Agent Runtime。** 模块化设计 — 任意组件均可替换，不影响其他部分。
 
 MonoX 以长期运行的 Python 进程运行，通过 WebSocket 通信。Channel、Skills 以及其他 harness 扩展均位于 `extensions/`，与核心完全解耦。
-
-![License](https://img.shields.io/github/license/halcyonway/MonoX?color=3b82f6) ![Python](https://img.shields.io/badge/Python-3.11+-3b82f6?logo=python) ![MonoX](https://img.shields.io/badge/MonoX-Runtime-8b5cf6?logo=python)
 
 ## 特性
 

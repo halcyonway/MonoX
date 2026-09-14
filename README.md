@@ -1,18 +1,20 @@
-<p align="center">
-  <img src="logo.svg" alt="MonoX" width="128"/>
-</p>
+<div align="center">
 
-<p align="center">
-  <strong>English</strong> · <a href="README_zh.md">中文</a>
-</p>
+<img src="logo.svg" alt="MonoX" width="280"/>
+
+**English** · [中文](README_zh.md)
+
+[![License](https://img.shields.io/github/license/halcyonway/MonoX?style=for-the-badge&color=1d4ed8)](LICENSE)
+[![Python](https://img.shields.io/badge/Python-3.11+-1d4ed8?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org)
+[![WebSocket](https://img.shields.io/badge/WebSocket-Native-8b5cf6?style=for-the-badge&logo=socket.io&logoColor=white)](https://github.com/halcyonway/MonoX)
+
+</div>
 
 # MonoX
 
 **A minimal, self-hosted Agent Runtime.** Modular by design — swap any component without touching the rest.
 
 MonoX runs as a long-lived Python process speaking WebSocket. Channels, skills, and other harness extensions live in `extensions/` — completely decoupled from the core.
-
-![License](https://img.shields.io/github/license/halcyonway/MonoX?color=3b82f6) ![Python](https://img.shields.io/badge/Python-3.11+-3b82f6?logo=python) ![MonoX](https://img.shields.io/badge/MonoX-Runtime-8b5cf6?logo=python)
 
 ## Features
 
