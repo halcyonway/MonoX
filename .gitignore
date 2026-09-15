@@ -25,3 +25,10 @@ tmp/
 
 # local config — keep config.example.toml as template, ignore user's config.toml
 config.toml
+
+# AI agent instructions (CLAUDE.md / AGENT.md) are personal per-developer,
+# never commit them. Use spec/ for project-shared conventions.
+CLAUDE.md
+AGENT.md
+CLAUDE.local.md
+AGENT.local.md
