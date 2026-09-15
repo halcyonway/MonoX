@@ -45,6 +45,44 @@ export ALI_YUN_API_KEY=sk-sp-...   # fallback（百炼 app key，不能调 model
 看到清晰错误信息而不是崩溃；如果你看到 fallback 路径失败，记得改用
 `DASHSCOPE_API_KEY`。
 
+## 耗时与并发
+
+**单次 30-60s 出图。** `apply` / `raw` 走 `qwen-image-3.0-pro` 模型，实测 30-60s 出图。
+**用 `fork_task`，不要用 `bash`。** system prompt 的 `## Async tasks` 段讲了 fork /
+poll / cancel 完整生命周期——fork 一个 subagent 调 `exec_cli mono_i2i apply ...`，
+父 turn 不阻塞，子任务完成时通过 `<event kind='system' event_type='async-task-result'>`
+自动唤醒。
+
+**多模板并行生成：** 用户给 N 张图 / N 个模板要同时出 N 张图时，**一次 assistant
+turn fork N 个 subagent**（N 个并行 tool call），不要串行 fork。完成后等 N 个
+`async-task-result` 事件一起回来，统一汇报给用户。
+
+**例：并行生成 3 张图：**
+
+```python
+# 同一个 assistant turn 里 3 个并行 fork_task 调用：
+fork_task(description="用 photo-journal 模板处理 input.jpg",
+          kind="subagent",
+          meta={"kind": "i2i_apply", "template": "photo-journal"})
+# → {"task_id": "t1", ...}
+
+fork_task(description="用 watercolor-soft 模板处理 input.jpg",
+          kind="subagent",
+          meta={"kind": "i2i_apply", "template": "watercolor-soft"})
+# → {"task_id": "t2", ...}
+
+fork_task(description="用 polaroid-vintage 模板处理 input.jpg",
+          kind="subagent",
+          meta={"kind": "i2i_apply", "template": "polaroid-vintage"})
+# → {"task_id": "t3", ...}
+
+# 父 turn 立即返回；3 个 subagent 并行跑（各自 30-60s）；
+# 等 3 个 async-task-result 事件逐个到达，汇总 3 个 saved_path 告诉用户。
+```
+
+`meta={"kind": "i2i_apply", "template": ...}` 是给 MonoDesk 看板用的——用户能直观
+看到"正在并行处理 3 张图"。
+
 ## 三种使用模式
 
 ### 模式 1：模板 CRUD

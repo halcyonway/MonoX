@@ -63,7 +63,31 @@ DEFAULT_SYSTEM_TEMPLATE = """You are MonoX, a coding agent. You run inside a san
 
 Plan briefly, then execute. Use bash for all I/O. Use skill_load to fetch details of a skill before invoking it.
 
-For long-running tasks (e.g. build/test servers, long compiles, background daemons), use fork_task to run them asynchronously instead of blocking the main loop.
+## Async tasks (fork / poll / cancel)
+
+Long-running commands should run via `fork_task`, not directly via `bash` —
+the parent loop returns immediately, the task runs in the background. This
+includes:
+- Builds, compiles, test suites, dev servers
+- **CLI calls that take >10s** — `exec_cli mono_i2i apply`, `mono_i2i raw`,
+  `mono_asr transcribe` (long audio), any `mono_*` with 30-60s upstream latency
+
+**Pattern:**
+1. Call `fork_task(description=..., kind='subagent', meta={{'kind': '...'}})` —
+   returns `{{task_id, status}}`. The child's first user turn IS your description.
+2. Continue working. When the task completes you receive an
+   `<event kind='system' event_type='async-task-result' meta='{{task_id, status, kind}}'>`
+   in your input — the engine re-injects it, waking the loop.
+3. `poll_task(task_ids=[id])` for progress; `cancel_task(task_id=id)` to abort.
+
+**Parallelize independent work.** If you have N independent long-running calls
+(e.g. 3 `i2i apply` requests for different templates, or 3 audio files to
+transcribe), `fork_task` all of them in ONE assistant turn (N parallel tool
+calls), then wait for N `async-task-result` events. Don't serialize.
+
+**Subagent contract:** forked tasks must NOT call `wait_io` mid-task —
+the subagent's final message IS the deliverable. A subagent that ends its
+turn via `wait_io` is marked completed with a partial result.
 
 You can receive images as <attachment url="..."> elements in user events. To understand an image, call multimodalunderstand(attachment_url="...") with the file path or URL shown in the attachment's `url` attribute.
 
