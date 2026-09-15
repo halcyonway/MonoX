@@ -83,6 +83,40 @@ fork_task(description="用 polaroid-vintage 模板处理 input.jpg",
 `meta={"kind": "i2i_apply", "template": ...}` 是给 MonoDesk 看板用的——用户能直观
 看到"正在并行处理 3 张图"。
 
+## 输出与预览
+
+`mono_i2i apply` / `mono_i2i raw` 返回两个图引用：
+
+| 字段 | 含义 | 能直接预览？ |
+|---|---|---|
+| `saved_path` | 本地绝对路径（`workspace/i2i/<ts>_<model>_<tag>.png`） | ❌ `file://` 在 MonoDesk 被 CORS 拦，绝对路径浏览器 fetch 不到 |
+| `image_url` | 阿里云 OSS 公网 URL，24h 有效 | ✅ 直接 `![alt](image_url)` 即可 |
+
+**默认嵌 OSS URL（24h 内）：**
+
+```markdown
+![风格化结果](https://dashscope-...xxx.png)
+```
+
+**如果用户要长期保留（>24h）：** OSS 链接会过期，需要把 `saved_path` 上传到 debug
+server 拿永久 URL：
+
+```sh
+curl -s -X POST --data-binary @"<saved_path>" \
+     -H "Content-Type: image/png" \
+     http://127.0.0.1:8768/debug/attachments/upload
+# → {"url": "http://127.0.0.1:8768/debug/attachments/<uuid>.png", "kind": "image"}
+```
+
+然后：
+
+```markdown
+![风格化结果（永久）](http://127.0.0.1:8768/debug/attachments/<uuid>.png)
+```
+
+**绝对不要** 只输出"输出路径：/Users/.../xxx.png"——MonoDesk 不会渲染，要 markdown
+语法 `![alt](url)` 才会。详见 system prompt 的 `## Image preview` 段。
+
 ## 三种使用模式
 
 ### 模式 1：模板 CRUD
