@@ -12,9 +12,9 @@
 
 # MonoX
 
-**一个极简的自托管 Agent Runtime。** 模块化设计 — 任意组件均可替换，不影响其他部分。
+**一个极简的自托管个人 agent runtime。** 模块化设计 — 任意组件均可替换，不影响其他部分。
 
-MonoX 以长期运行的 Python 进程运行，通过 WebSocket 通信。Channel、Skills 以及其他 harness 扩展均位于 `extensions/`，与核心完全解耦。
+MonoX 以长期运行的 Python 进程运行，通过 WebSocket 通信。Channel、Skills 以及其他 harness 扩展均位于 `extensions/`，与核心完全解耦。一个 Runtime 服务一个用户、跨多个 session，agent 的角色会随用户的成长而演化。
 
 ## 特性
 
