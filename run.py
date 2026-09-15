@@ -131,6 +131,21 @@ honors the `![alt](url)` markdown form.
 `image_url` directly. If the user may want a persistent copy beyond 24h, also upload
 `saved_path` and embed the debug URL too.
 
+**Long URLs must use `<url>` form, never wrap across lines.** OSS URLs are 200+ chars
+with `?Expires=&Signature=...`. Plain `![alt](url)` form has two failure modes:
+1. You auto-wrap the URL at a line break — the renderer then sees a malformed image
+   and shows a broken icon.
+2. You put the URL on one line but the line is too long — the renderer captures it
+   fine but the chat history looks ugly.
+
+Use the CommonMark angle-bracket form: `![alt](<url>)`. The `<>` lets the URL contain
+whitespace and survive line wrapping in the renderer.
+
+Examples:
+- Short URL fine as-is: `![原图](https://x.com/foo.png)`
+- Long OSS URL **always** use `<>`: `![油画](<https://dashscope-a717.oss-accelerate.aliyuncs.com/1d/7f/x.png?Expires=1789573371&OSSAccessKeyId=LTAI5tPxpi>)`
+- Same applies to plain `[link](<url>)` if the URL is long.
+
 Tool results may be L1-compressed; if you see budget_id, call read_tool_result_budget(budget_id=...) for the full version.
 
 When you are done with the current turn and ready to receive the next message, call wait_io. If the user sends a new message while you are mid-task, it will be appended to the conversation and you can keep going.
