@@ -47,14 +47,10 @@ Next:
   export MINIMAX_API_KEY=<your-key>     # or OPENAI_API_KEY / DEEPSEEK_API_KEY etc.
   uv run python run.py
 
-Optional — extension CLI server (让 LLM 能用 \`exec_cli mono_search\`,
-\`mono_i2i\`, \`mono_asr\` 等原子能力):
-  uv run python -m extensions.cli.inner.server    # 前台跑（debug 用）
-  # 或用 nohup / supervisor / launchd 后台常驻：
-  nohup uv run python -m extensions.cli.inner.server > "\$MONOX_HOME/state/cli-server.log" 2>&1 &
-
-  健康检查:  curl -s http://127.0.0.1:8769/healthz | jq .
-  调一个试试: exec_cli mono_search "test"
+\`run.py\` 自动起三个子服务（health :8767 / debug :8768 / CLI server :8769），
+跟 Runtime 同生命周期——\`run.py --stop\` 一起收。CLI server 让 LLM 能用
+\`exec_cli mono_search\` / \`mono_i2i\` / \`mono_asr\` 等原子能力，install.sh
+不负责启动任何 server。
 
 (Edit config.toml if api_base / api_key / model don't match your provider.)
 

@@ -16,18 +16,21 @@ MonoX 是一个自托管的 agent runtime。本文档是架构的唯一权威说
 
 ## 2. 架构总览
 
-MonoX 由 **Runtime 进程** + **N 个 Channel 进程** + **Extension CLI Server** 组成：
+MonoX 由 **Runtime 进程** + **N 个 Channel 进程** 组成。Runtime 进程内除核心
+loop / session manager 外，还装配若干**同生命周期**的 HTTP/WS 子服务：
 
 - **Runtime 进程**（`python run.py`）：`SessionManager`（多 LoopEngine + idle 销毁
   + checkpoint 恢复）+ `RuntimeServer`（多 session_key ws 索引 + last_active_source
-  fan-out）+ `HealthServer`（`GET /health`）；**对 channel 类型一无所知**，只接 ws 帧
+  fan-out）+ 三个同生命周期子服务：
+  - `HealthServer`（`GET /health`，http :8767）
+  - `DebugServer`（observability 入口，http :8768）
+  - **`Extension CLI Server`**（`python -m extensions.cli.inner.server`，http :8769）——LLM 通过 `bash` 工具调 `exec_cli mono_<name>` → subprocess 调 urllib → HTTP POST 到 :8769。
+    `run.py` 启动时 spawn 它，shutdown 时 SIGTERM → 2s 超时 → SIGKILL 一起收摊。
+    详见 `requirements/extension-cli-server.md`。
+  **对 channel 类型一无所知**，只接 ws 帧
 - **Channel 进程**（每个 `extensions/channels/<name>/__main__.py` 一个）：拉起一个
   channel adapter（monoDesk ws server / terminal stdio TUI / feishu lark / textual
   TUI）+ 一个 `RuntimeWSClient` 连 Runtime；channel-specific 依赖只在该进程加载
-- **Extension CLI Server**（独立进程，`python -m extensions.cli.inner.server`，:8769）：
-  原子能力 HTTP 网关。Runtime **不** spawn 它、不感知它存在——LLM 通过 `bash` 工具
-  调 `exec_cli mono_<name>` → subprocess 调 urllib → HTTP POST 到 :8769。详见
-  `requirements/extension-cli-server.md`
 
 ```
 ┌────────────────── Runtime 进程 ─────────────────────┐
@@ -54,6 +57,15 @@ MonoX 由 **Runtime 进程** + **N 个 Channel 进程** + **Extension CLI Server
 │   ┌────────────────┐  http (:8767)    │               │
 │   │ HealthServer   │  GET /health →   │               │
 │   └────────────────┘  {sessions:[…]}  │               │
+│                                       │               │
+│   ┌────────────────┐  http (:8768)    │               │
+│   │ DebugServer    │  observability   │               │
+│   └────────────────┘                  │               │
+│                                       │               │
+│   ┌────────────────┐  http (:8769)    │               │
+│   │ Extension CLI  │  POST /cli/<sub> │               │
+│   │ Server         │  ←── exec_cli    │               │
+│   └────────────────┘  ←── LLM bash    │               │
 └───────────────────────────────────────────────────────┘
 
    Channel 进程 (×N，每个独立)：
@@ -91,13 +103,12 @@ run_channel），不属于 core。
 |---|---|---|
 | `core/` | 稳定内核：协议 + ReAct 引擎 + 存储/执行抽象。零 UI / 零 IM / 零 LLM SDK | 稳定，不轻易改 |
 | `extensions/` | 适配层：channel adapter、skill、CLI atomic capability | 可随意重写 |
-| `run.py` | 装配层：实例化具体实现，注入 core | 每用户可改 |
+| `run.py` | 装配层：实例化具体实现 + 拉起同生命周期子服务（health / debug / CLI server），注入 core | 每用户可改 |
 
-> **CLI server 不归 Runtime 管**：CLI server 是 `extensions/cli/inner/server.py`
-> 的独立进程，**不**被 `run.py` spawn、不参与 Runtime 的生命周期（不写 PID 文件、
-> 不被 `--stop` 收）。Runtime spawn 任何东西都违反了 extensions 不该自己组装的
-> 边界——CLI server 自己起、自己挂、自己 supervisor。详见
-> `requirements/extension-cli-server.md`。
+> **同生命周期子服务归 Runtime 管**：health / debug / CLI server 都是 Runtime 进程的
+> 子进程，stdout/stderr 共享、`run.py --stop` 一起收——和 channel 进程（独立进程 +
+> `RuntimeWSClient` 连 Runtime）**完全不同的关系**。详见
+> `requirements/extension-cli-server.md` §"Runtime spawn CLI server 的语义"。
 
 ---
 

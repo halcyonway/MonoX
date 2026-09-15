@@ -23,21 +23,29 @@ MonoX 的 LLM agent 通过 `bash` 工具执行 shell 命令调外部能力（搜
 
 - **不改**：`core/` 任何模块（CLI server 是 extensions/ 自己的事，runtime 不知道它存在）
 - **不改**：`Channel` Protocol / `Tool` Protocol（exec_cli 是外部命令，bash 工具直接调，不进 OpenAI function-call schema）
-- **不改**：`run.py`（CLI server 由 operator 手动或 supervisor 拉起，**不**由 Runtime spawn——见 §"为什么 Runtime 不 spawn CLI server"）
+- **修改**：`run.py` —— `run.py` 是 Runtime 装配入口，会一并拉起 health / debug / **CLI server** 三个同生命周期子服务（详见 §"Runtime spawn CLI server 的语义"）
 - **不引入** WebSocket / async——stdlib `http.server.ThreadingHTTPServer` + `urllib.request` 够用
 - **不做** 进程内热重载——改 capability 脚本就重启 server（跟 Runtime 改完重启一个量级）
 
-### 为什么 Runtime 不 spawn CLI server
+### Runtime spawn CLI server 的语义
 
-表面上看起来 "Runtime 启动时顺便 spawn CLI server" 跟"feishu channel 由 Runtime 代拉"是同构的——但语义不同：
+CLI server 是 Runtime 进程的**子进程**，跟 `HealthServer` / `DebugServer` 同性质——`run.py`
+启动时一并 `subprocess.Popen`，shutdown 时一起 SIGTERM → 2s 超时 → SIGKILL。
+`run.py --stop` 也清 :8769（端口通过 `MONOX_CLI_PORT` 环境变量覆盖）。
 
-| 维度 | feishu channel | CLI server |
+跟 **channel 进程**（独立 Python 进程 + `RuntimeWSClient` 连 Runtime ws server）完全不同：
+
+| 维度 | health / debug / CLI server（Runtime 子服务） | channel 进程 |
 |---|---|---|
-| 谁消费 Runtime 的输出 | 是（channel 把 ws 帧翻译成 IM） | 否（agent 根本不通过 wire 跟 CLI server 通信） |
-| 挂了 Runtime 受影响吗 | 是（Runtime 知道 channel 死了要重连） | 否（agent 下次 bash 调用会失败，但 Runtime 不知道也不需要知道） |
-| 生命周期归属 | Runtime 同生命周期 | 独立 operator 进程，独立重启 |
+| 谁启动 | `run.py` 一次性 spawn | `run.py` spawn（feishu 等条件性）+ operator 手动 |
+| 进程边界 | Runtime 进程内子进程；stdout/stderr 共享 | 独立 Python 进程；自己 stdio / 日志 |
+| 跟 Runtime 通信 | 不通信（独立监听端口） | `RuntimeWSClient` ws 连 :8765 |
+| 挂了 Runtime 受影响 | Runtime 整个 exit | 单 channel 重连，其他 channel 不受影响 |
+| 生命周期归属 | Runtime 同生命周期（startup / shutdown 一起） | 各自独立生命周期 |
+| install.sh 提示 | 不提示（默认起） | install.sh 不管；operator 自己起 |
 
-CLI server 跟 Runtime 是 **消费者关系**（Runtime 的 bash 工具 spawn 子进程调 exec_cli → exec_cli HTTP 到 server），不是 Runtime 的 child。Runtime 一旦 spawn CLI server，就违反了 §ARCHITECTURE §2 的依赖方向——extensions 应该被 Runtime 消费，不应该反过来拉起"兄弟"。
+**判断标准**：跟 Runtime 共享 stderr / 一起死 / Runtime 退出不需要它还活着 → Runtime
+子服务。走 ws 跟 Runtime 通信 / 单独挂了不影响别的 / 各自重启 → 独立 channel 进程。
 
 ---
 
@@ -52,9 +60,9 @@ LLM (bash tool)
 ~/.local/bin/exec_cli  ── HTTP POST ──►  :8769/cli/mono_search
                                        │
                               ┌────────┴────────┐
-                              │ cli server      │
-                              │ (extensions/cli/│
-                              │  inner/server)  │
+                              │ CLI server (Runtime 子进程)
+                              │ extensions/cli/ │
+                              │ inner/server.py │
                               │                 │
                               │ registry route  │
                               │ mono_search →   │
@@ -66,11 +74,13 @@ LLM (bash tool)
                               └─ HTTPS POST bocha API
 ```
 
-CLI server **完全独立进程**：
-- 端口 `:8769`（避开 Runtime 8765 / health 8767 / debug 8768）
-- 不连 Runtime ws server
-- 不被 `run.py --stop` 管（用 PID 文件 / supervisor 自己管，或 operator `kill <pid>`）
-- 重启不影响 Runtime 或 agent 当前 turn——下次 bash 调用才感知
+CLI server 是 Runtime 子进程：
+- 端口 `:8769`（避开 Runtime 8765 / health 8767 / debug 8768；可通过 `MONOX_CLI_PORT` 覆盖）
+- stdout / stderr 跟 Runtime 共享
+- `run.py` 启动时 spawn；shutdown 时 SIGTERM → 2s → SIGKILL 一起收
+- `run.py --stop` 清 :8769
+- 手动起：调试 / 想脱离 Runtime 单跑 CLI server 时 `python -m extensions.cli.inner.server`
+  即可；install.sh 不管
 
 ### 文件结构
 
