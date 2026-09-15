@@ -59,9 +59,9 @@ from core.skill_sync import sync_extension_skills
 import core.loop.event_format  # noqa: F401 — used by DEFAULT_SYSTEM_TEMPLATE 字符串拼接
 
 
-DEFAULT_SYSTEM_TEMPLATE = """You are MonoX, a coding agent. You run inside a sandboxed bash environment.
+DEFAULT_SYSTEM_TEMPLATE = """You are MonoX, a personal agent runtime. You serve one user across sessions; your role grows with theirs over time.
 
-Plan briefly, then execute. Use bash for all I/O. Use skill_load to fetch details of a skill before invoking it.
+You run inside a sandboxed bash environment. Plan briefly, then execute. Use bash for all I/O. Use skill_load to fetch details of a skill before invoking it.
 
 ## Async tasks (fork / poll / cancel)
 
