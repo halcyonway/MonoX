@@ -122,7 +122,7 @@ _log = logging.getLogger("monox.runtime")
 # run.py 自己的 PID 文件路径 + Runtime 默认占用的两个端口。
 # `--stop` 用 PID 文件找本进程；用端口扫残留（PID 文件丢失或之前 crash 留下的进程）。
 PID_FILE = Path(".monox/runtime.pid")
-DEFAULT_RUNTIME_PORTS = (8765, 8767, 8768)  # ws server / health / debug (trace)
+DEFAULT_RUNTIME_PORTS = (8765, 8767, 8768, 8769)  # ws server / health / debug / cli
 
 
 def _pid_alive(pid: int) -> bool:
@@ -489,7 +489,8 @@ async def run(cfg_path: str, args: argparse.Namespace) -> None:
 
     print(
         f"[monox-runtime] ws :{cfg.server.port} (default_session_key={cfg.session_key!r}), "
-        f"health :{health_port}, debug :{debug_port}, idle_timeout={session_mgr._idle_timeout_sec}s, "
+        f"health :{health_port}, debug :{debug_port}, cli :{cli_port}, "
+        f"idle_timeout={session_mgr._idle_timeout_sec}s, "
         f"async_tasks_restored={len(async_task_mgr.list())}",
         flush=True,
     )
@@ -497,12 +498,28 @@ async def run(cfg_path: str, args: argparse.Namespace) -> None:
     # feishu 由 run.py 代拉起（config 配了 app_id/app_secret 才 spawn；否则 None）
     feishu_proc = _spawn_feishu(cfg)
 
+    # CLI server 由 run.py 代拉起（extension 能力的 HTTP 入口，:8769）。
+    # 无条件起 —— LLM 通过 exec_cli 调用 mono_* 子命令需要它。
+    cli_port = int(os.environ.get("MONOX_CLI_PORT", "8769"))
+    cli_proc = subprocess.Popen(
+        [sys.executable, "-m", "extensions.cli.inner.server",
+         f"--host={cfg.server.host}", f"--port={cli_port}"],
+        stdout=sys.stdout, stderr=sys.stderr,
+    )
+    _log.info("[cli-server] spawned pid=%d on %s:%d", cli_proc.pid, cfg.server.host, cli_port)
+
     await session_mgr.start()
     try:
         await asyncio.gather(server.run(), health.run(), debug.run_server())
     finally:
         if feishu_proc is not None and feishu_proc.poll() is None:
             feishu_proc.terminate()
+        if cli_proc.poll() is None:
+            cli_proc.terminate()
+            try:
+                cli_proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                cli_proc.kill()
         await async_task_mgr.shutdown()  # 先收摊 async task（flush task.json）
         await session_mgr.stop()
         await server.stop()
@@ -519,5 +536,9 @@ if __name__ == "__main__":
             ports = tuple({args.server_port, *(p for p in ports if p != 8765)})
         if args.health_port is not None:
             ports = tuple({args.health_port, *(p for p in ports if p != 8767)})
+        if args.debug_port is not None:
+            ports = tuple({args.debug_port, *(p for p in ports if p != 8768)})
+        cli_port_env = int(os.environ.get("MONOX_CLI_PORT", "8769"))
+        ports = tuple({cli_port_env, *(p for p in ports if p != 8769)})
         sys.exit(stop_run(ports))
     asyncio.run(run(args.config, args))
