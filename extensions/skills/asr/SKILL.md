@@ -10,13 +10,13 @@ tier: 1
 
 ## 调用方式
 
-通过 `exec_cli` 调 CLI server：
+通过 `exec_cli` 调 CLI server（端口 8769，本机常驻）：
 
 ```sh
 exec_cli mono_asr transcribe <audio_path> [--language en-US] [--keep-chunks]
-                                       [--chunk-sec 600] [--concurrency 3]
-exec_cli mono_asr list                       # 列所有已转写
-exec_cli mono_asr show <basename>            # 按 basename 子串查最新
+                                      [--chunk-sec 600] [--concurrency 3]
+exec_cli mono_asr list                          # 列所有已转写
+exec_cli mono_asr show <basename>               # 按 basename 子串查最新
 ```
 
 ## 长音频策略（> 10 分钟）
@@ -24,6 +24,8 @@ exec_cli mono_asr show <basename>            # 按 basename 子串查最新
 脚本会自动：
 1. `ffprobe` 探测总时长
 2. **> 10 min** → 多次调 `ffmpeg -ss <start> -i <src> -t 600 -f s16le ...` 切成 10min PCM 块
+   > 不用 `-f segment` 是因为 ffmpeg 8.0 segment muxer 对 raw PCM 输出有 bug（实测 60s 输入只输出 15s）。
+   > `-ss` 在 `-i` 之前 = fast seek，AAC/m4a 直接 seek 到最近 keyframe，单次 ffmpeg <1s。
 3. `asyncio.gather` + `Semaphore(3)` 并发调 WS（同时 ≤3 个连接）
 4. 每块最多 **3 次重试**，指数退避 2s → 4s → 8s
 5. 按 idx 顺序拼接，失败块用 `[chunk N failed: <err>]` 占位（其他块照样出文本）
@@ -77,27 +79,6 @@ export HUOSHAN_API_KEY=ark-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 ```
 
 `text` 字段含拼接好的完整文本（失败块用 `[chunk N failed: ...]` 占位）。
-
-## 工作流（agent 调用）
-
-### 步骤 1：转写
-
-用户提供音频 path（可能在 `~/Downloads`、`~/Desktop`、MonoDesk 上传目录等）。
-MonoX 找到这个 path 后调：
-
-```sh
-exec_cli mono_asr transcribe /path/to/audio.m4a
-# → 返回上面的 envelope（含 text 字段直接可用）
-```
-
-支持的音频格式：`mp3` / `m4a` / `wav` / `opus` / `ogg` / `flac` / `aac` 等（脚本内部统一
-ffmpeg 转 PCM mono 16kHz 16-bit 再调 API）。
-
-可选参数：
-- `--language en-US` 等（默认 `zh-CN`）
-- `--chunk-sec 300` 切分粒度（默认 600 秒 = 10 分钟）
-- `--concurrency 5` 并发 WS 数（默认 3，保守值；Volcengine 速率未知不建议调大）
-- `--keep-chunks` 保留 ffmpeg 切分的中间 PCM 文件（debug 用）
 
 ### 步骤 2：拿到结果后
 
@@ -153,13 +134,14 @@ cat <txt_path>
 ## 错误处理
 
 | 现象 | 处理 |
-|------|------|
+|---|---|
 | `HUOSHAN_API_KEY not set` | zshrc 没设，检查 `echo $HUOSHAN_API_KEY` |
 | `HTTP 401` 或 `401 Unauthorized` | key 不是 Agent Plan key，重新从控制台 Agent Plan 页签拿 |
 | `ffmpeg not found` | 系统没装 ffmpeg，`brew install ffmpeg` |
 | API 返回空 text | 音频静音 / 格式异常，用 ffmpeg 单独检查音频能量 |
 | 单块失败 | 自动 retry 最多 3 次（指数退避） |
 | `.asr.txt` 里出现 `[chunk N failed: ...]` | 该块 3 次都失败，看 `meta.chunks[N].error`；其他块照常用 |
+| `exec_cli: cannot reach CLI server at ...` | 先 `uv run python -m extensions.cli.inner.server &` 起 server |
 
 ## 输出路径
 

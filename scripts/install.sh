@@ -2,6 +2,7 @@
 # install.sh — 一次性本地准备。
 # - 建 $MONOX_HOME/{workspace,memory,state,traces,skills,tmp}（默认 ./.monox）
 # - 把 extensions/skills/* 拷到 skills/（仅当 skills 为空时）
+# - 把 extensions/cli/inner/exec_cli.py 拷到 ~/.local/bin/exec_cli
 # - .monox/memory/Memory.md 不在这里预建——run.py 启动时写 starter，install 时不必管
 set -euo pipefail
 
@@ -18,24 +19,24 @@ if [ -z "$(ls -A "$ROOT/skills" 2>/dev/null)" ]; then
     fi
 fi
 
-# 安装 exec_cli（extension CLI HTTP 客户端）到 ~/.local/bin/
-# 让 LLM（和人类）通过 `exec_cli mono_search "..."` 调用 extension 能力。
-# 只 install，不启动 CLI server —— server 由用户手动或 supervisor 拉起。
-ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-EXEC_CLI_SRC="$ROOT_DIR/extensions/cli/inner/exec_cli.py"
+# Install exec_cli shell client
+EXEC_CLI_SRC="$(cd "$(dirname "$0")/.." && pwd)/extensions/cli/inner/exec_cli.py"
 INSTALL_BIN_DIR="${HOME}/.local/bin"
-INSTALL_BIN="$INSTALL_BIN_DIR/exec_cli"
+INSTALL_BIN="${INSTALL_BIN_DIR}/exec_cli"
 if [ -f "$EXEC_CLI_SRC" ]; then
     mkdir -p "$INSTALL_BIN_DIR"
+    # 拷贝（不软链）：server source 位置变了也不会断
     cp "$EXEC_CLI_SRC" "$INSTALL_BIN"
     chmod +x "$INSTALL_BIN"
     echo "Installed exec_cli → $INSTALL_BIN"
+
+    # PATH 警告（不自动 export——install.sh 不假设 shell 类型）
     case ":$PATH:" in
-        *":$INSTALL_BIN_DIR:"*) ;;
-        *) echo "  (note: $INSTALL_BIN_DIR is not on PATH; add it or use full path)" ;;
+        *":${INSTALL_BIN_DIR}:"*) ;;
+        *)
+            echo "WARNING: ${INSTALL_BIN_DIR} not in PATH; add it or use full path \`${INSTALL_BIN}\`"
+            ;;
     esac
-else
-    echo "WARN: exec_cli source not found at $EXEC_CLI_SRC — skipping install"
 fi
 
 cat <<EOF
@@ -43,13 +44,17 @@ cat <<EOF
 Done.
 
 Next:
-  # (1) LLM API key（runtime 用）
   export MINIMAX_API_KEY=<your-key>     # or OPENAI_API_KEY / DEEPSEEK_API_KEY etc.
   uv run python run.py
 
-  # (2) Extension CLI（如 search）— 手动启动 server（一次性）
-  uv run python -m extensions.cli.inner.server &
-  export BOCHA_API_KEY=<your-bocha-key>   # 任何用 mono_search 的子命令需要这个
+Optional — extension CLI server (让 LLM 能用 \`exec_cli mono_search\`,
+\`mono_i2i\`, \`mono_asr\` 等原子能力):
+  uv run python -m extensions.cli.inner.server    # 前台跑（debug 用）
+  # 或用 nohup / supervisor / launchd 后台常驻：
+  nohup uv run python -m extensions.cli.inner.server > "\$MONOX_HOME/state/cli-server.log" 2>&1 &
+
+  健康检查:  curl -s http://127.0.0.1:8769/healthz | jq .
+  调一个试试: exec_cli mono_search "test"
 
 (Edit config.toml if api_base / api_key / model don't match your provider.)
 

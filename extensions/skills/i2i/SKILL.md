@@ -12,21 +12,21 @@ tier: 1
 
 ## 调用方式
 
-通过 `exec_cli` 调 CLI server：
+通过 `exec_cli` 调 CLI server（端口 8769，本机常驻）：
 
 ```sh
-exec_cli mono_i2i list                                        # 列所有模板
-exec_cli mono_i2i show <name>                                 # 打印模板全文
-exec_cli mono_i2i add <name> --description "..." --prompt "<prompt正文>"  [--tags t1 t2] [--force]
-                                                                # 从 --prompt 创建模板
-exec_cli mono_i2i rm <name> [-y]                              # 删（-y 跳过确认）
+exec_cli mono_i2i list                                         # 列所有模板
+exec_cli mono_i2i show <name>                                  # 打印模板全文
+exec_cli mono_i2i add <name> --description "..." --prompt "<prompt 正文>" [--tags t1 t2] [--force]
+                                                                # 创建模板
+exec_cli mono_i2i rm <name> [-y]                               # 删（-y 跳过确认）
 exec_cli mono_i2i apply --image <path> --template <name> [--model ...]
                                                                 # 应用模板 → 生成图
 exec_cli mono_i2i raw --image <path> --prompt "..." [--model ...] [--save-as <name>] [--save-description "..."]
                                                                 # 实时 prompt → 生成图（可选保存成模板）
 ```
 
-`edit` 子命令在 CLI server 模式下不支持（server 没有 TTY / $EDITOR），需要编辑模板时直接改文件：
+`edit` 子命令在 CLI server 模式下不支持（server 没有 TTY / `$EDITOR`），需要编辑模板时直接改文件：
 `<repo>/extensions/cli/i2i/templates/<name>.md` 或 `.monox/skills/i2i/templates/<name>.md`（运行时副本）。
 
 ## API key
@@ -49,8 +49,8 @@ export ALI_YUN_API_KEY=sk-sp-...   # fallback（百炼 app key，不能调 model
 
 ### 模式 1：模板 CRUD
 
-模板就是一段 prompt，存在本 skill 的 `templates/<name>.md`，frontmatter 是
-YAML metadata，body 是 prompt 文本。
+模板就是一段 prompt，存在 `<repo>/extensions/cli/i2i/templates/<name>.md`，
+frontmatter 是 YAML metadata，body 是 prompt 文本。
 
 CLI 输出格式（`list`）：
 
@@ -98,10 +98,11 @@ CLI 输出格式（`apply`）：
 ## 错误处理
 
 | 现象 | 处理 |
-|------|------|
+|---|---|
 | `DASHSCOPE_API_KEY` / `ALI_YUN_API_KEY` 都没设 | export 后重试 |
 | `dashscope HTTP 401` | 99% 是 `ALI_YUN_API_KEY` 在用，改用 `DASHSCOPE_API_KEY` |
 | `dashscope HTTP 400` | 检查输入图路径 / base64 编码 |
 | 超时 | 默认 180s，qwen-image-3.0-pro 一般 30-60s 出图 |
 | `image not found` | 路径不对，先 `ls` 确认 |
 | `edit not supported in CLI server mode` | 直接编辑 `templates/<name>.md` 文件 |
+| `exec_cli: cannot reach CLI server at ...` | 先 `uv run python -m extensions.cli.inner.server &` 起 server |
