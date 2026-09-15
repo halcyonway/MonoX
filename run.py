@@ -284,6 +284,12 @@ def parse_args() -> argparse.Namespace:
         help="Override health server port (default: 8767).",
     )
     parser.add_argument(
+        "--debug-port",
+        type=int,
+        default=None,
+        help="Override debug server port (default: 8768).",
+    )
+    parser.add_argument(
         "--idle-timeout",
         type=int,
         default=None,
@@ -292,7 +298,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--stop",
         action="store_true",
-        help="Kill any running Runtime (PID file + port sweep on :8765/:8767/:8768) and exit.",
+        help="Kill any running Runtime (PID file + port sweep on :8765/:8767/:8768/:8769) and exit.",
     )
     return parser.parse_args()
 
