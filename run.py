@@ -487,6 +487,9 @@ async def run(cfg_path: str, args: argparse.Namespace) -> None:
         attachments_root=Path(cfg.sandbox.tmp_root),
     )
 
+    # CLI server 端口（:8769）：LLM 通过 exec_cli 调用 mono_* 子命令需要它。
+    cli_port = int(os.environ.get("MONOX_CLI_PORT", "8769"))
+
     print(
         f"[monox-runtime] ws :{cfg.server.port} (default_session_key={cfg.session_key!r}), "
         f"health :{health_port}, debug :{debug_port}, cli :{cli_port}, "
@@ -500,7 +503,6 @@ async def run(cfg_path: str, args: argparse.Namespace) -> None:
 
     # CLI server 由 run.py 代拉起（extension 能力的 HTTP 入口，:8769）。
     # 无条件起 —— LLM 通过 exec_cli 调用 mono_* 子命令需要它。
-    cli_port = int(os.environ.get("MONOX_CLI_PORT", "8769"))
     cli_proc = subprocess.Popen(
         [sys.executable, "-m", "extensions.cli.inner.server",
          f"--host={cfg.server.host}", f"--port={cli_port}"],
