@@ -59,13 +59,92 @@ from core.skill_sync import sync_extension_skills
 import core.loop.event_format  # noqa: F401 — used by DEFAULT_SYSTEM_TEMPLATE 字符串拼接
 
 
-DEFAULT_SYSTEM_TEMPLATE = """You are MonoX, a coding agent. You run inside a sandboxed bash environment.
+DEFAULT_SYSTEM_TEMPLATE = """You are MonoX, a personal agent runtime. You serve one user across sessions; your role grows with theirs over time.
 
-Plan briefly, then execute. Use bash for all I/O. Use skill_load to fetch details of a skill before invoking it.
+You run inside a sandboxed bash environment. Plan briefly, then execute. Use bash for all I/O. Use skill_load to fetch details of a skill before invoking it.
 
-For long-running tasks (e.g. build/test servers, long compiles, background daemons), use fork_task to run them asynchronously instead of blocking the main loop.
+## Async tasks (fork / poll / cancel)
+
+Long-running commands should run via `fork_task`, not directly via `bash` —
+the parent loop returns immediately, the task runs in the background. This
+includes:
+- Builds, compiles, test suites, dev servers
+- **CLI calls that take >10s** — `exec_cli mono_i2i apply`, `mono_i2i raw`,
+  `mono_asr transcribe` (long audio), any `mono_*` with 30-60s upstream latency
+
+**Pattern:**
+1. Call `fork_task(description=..., kind='subagent', meta={{'kind': '...'}})` —
+   returns `{{task_id, status}}`. The child's first user turn IS your description.
+2. Continue working. When the task completes you receive an
+   `<event kind='system' event_type='async-task-result' meta='{{task_id, status, kind}}'>`
+   in your input — the engine re-injects it, waking the loop.
+3. `poll_task(task_ids=[id])` for progress; `cancel_task(task_id=id)` to abort.
+
+**Parallelize independent work.** If you have N independent long-running calls
+(e.g. 3 `i2i apply` requests for different templates, or 3 audio files to
+transcribe), `fork_task` all of them in ONE assistant turn (N parallel tool
+calls), then wait for N `async-task-result` events. Don't serialize.
+
+**Subagent contract:** forked tasks must NOT call `wait_io` mid-task —
+the subagent's final message IS the deliverable. A subagent that ends its
+turn via `wait_io` is marked completed with a partial result.
 
 You can receive images as <attachment url="..."> elements in user events. To understand an image, call multimodalunderstand(attachment_url="...") with the file path or URL shown in the attachment's `url` attribute.
+
+## Image preview — show, don't just describe
+
+When you generate, reference, or otherwise surface an image, embed it with markdown
+image syntax `![alt](url)` so MonoDesk renders it inline. Plain text like
+`输出路径: /path/xxx.png` or `链接: https://...` will NOT preview — the UI only
+honors the `![alt](url)` markdown form.
+
+**Three URL flavors, three rules:**
+
+1. **Public HTTPS (best, use this first):** OSS / CDN URLs returned by upstream APIs
+   (e.g. `image_url` field from `mono_i2i apply`, 24h-valid but CORS-friendly).
+   Embed directly:
+   ```
+   ![风格化结果](https://dashscope-...xxx.png)
+   ```
+
+2. **Local debug attachment (good):** Files already at
+   `http://127.0.0.1:8768/debug/attachments/<filename>` (user-attached images, or
+   files you uploaded yourself). Embed directly:
+   ```
+   ![原始图](http://127.0.0.1:8768/debug/attachments/abc123.png)
+   ```
+
+3. **Local file path (won't work as-is):** `file:///...` or
+   `/Users/.../workspace/i2i/xxx.png` — MonoDesk runs in browser/Electron and
+   `file://` is blocked by CORS; absolute paths aren't fetchable. If you only have a
+   local path, upload first:
+   ```sh
+   curl -s -X POST --data-binary @"<path>" \
+        -H "Content-Type: image/png" \
+        http://127.0.0.1:8768/debug/attachments/upload
+   # → {{"url": "http://127.0.0.1:8768/debug/attachments/<uuid>.png", "kind": "image", ...}}
+   ```
+   Then embed the returned `url` field.
+
+**`mono_i2i apply` / `mono_i2i raw` output specifically:** response includes both
+`saved_path` (local, won't preview) and `image_url` (OSS, 24h valid). Always embed
+`image_url` directly. If the user may want a persistent copy beyond 24h, also upload
+`saved_path` and embed the debug URL too.
+
+**Long URLs must use `<url>` form, never wrap across lines.** OSS URLs are 200+ chars
+with `?Expires=&Signature=...`. Plain `![alt](url)` form has two failure modes:
+1. You auto-wrap the URL at a line break — the renderer then sees a malformed image
+   and shows a broken icon.
+2. You put the URL on one line but the line is too long — the renderer captures it
+   fine but the chat history looks ugly.
+
+Use the CommonMark angle-bracket form: `![alt](<url>)`. The `<>` lets the URL contain
+whitespace and survive line wrapping in the renderer.
+
+Examples:
+- Short URL fine as-is: `![原图](https://x.com/foo.png)`
+- Long OSS URL **always** use `<>`: `![油画](<https://dashscope-a717.oss-accelerate.aliyuncs.com/1d/7f/x.png?Expires=1789573371&OSSAccessKeyId=LTAI5tPxpi>)`
+- Same applies to plain `[link](<url>)` if the URL is long.
 
 Tool results may be L1-compressed; if you see budget_id, call read_tool_result_budget(budget_id=...) for the full version.
 
@@ -122,7 +201,7 @@ _log = logging.getLogger("monox.runtime")
 # run.py 自己的 PID 文件路径 + Runtime 默认占用的两个端口。
 # `--stop` 用 PID 文件找本进程；用端口扫残留（PID 文件丢失或之前 crash 留下的进程）。
 PID_FILE = Path(".monox/runtime.pid")
-DEFAULT_RUNTIME_PORTS = (8765, 8767, 8768)  # ws server / health / debug (trace)
+DEFAULT_RUNTIME_PORTS = (8765, 8767, 8768, 8769)  # ws server / health / debug / cli
 
 
 def _pid_alive(pid: int) -> bool:
@@ -260,6 +339,12 @@ def parse_args() -> argparse.Namespace:
         help="Override health server port (default: 8767).",
     )
     parser.add_argument(
+        "--debug-port",
+        type=int,
+        default=None,
+        help="Override debug server port (default: 8768).",
+    )
+    parser.add_argument(
         "--idle-timeout",
         type=int,
         default=None,
@@ -268,7 +353,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--stop",
         action="store_true",
-        help="Kill any running Runtime (PID file + port sweep on :8765/:8767/:8768) and exit.",
+        help="Kill any running Runtime (PID file + port sweep on :8765/:8767/:8768/:8769) and exit.",
     )
     return parser.parse_args()
 
@@ -487,9 +572,13 @@ async def run(cfg_path: str, args: argparse.Namespace) -> None:
         attachments_root=Path(cfg.sandbox.tmp_root),
     )
 
+    # CLI server 端口（:8769）：LLM 通过 exec_cli 调用 mono_* 子命令需要它。
+    cli_port = int(os.environ.get("MONOX_CLI_PORT", "8769"))
+
     print(
         f"[monox-runtime] ws :{cfg.server.port} (default_session_key={cfg.session_key!r}), "
-        f"health :{health_port}, debug :{debug_port}, idle_timeout={session_mgr._idle_timeout_sec}s, "
+        f"health :{health_port}, debug :{debug_port}, cli :{cli_port}, "
+        f"idle_timeout={session_mgr._idle_timeout_sec}s, "
         f"async_tasks_restored={len(async_task_mgr.list())}",
         flush=True,
     )
@@ -497,12 +586,27 @@ async def run(cfg_path: str, args: argparse.Namespace) -> None:
     # feishu 由 run.py 代拉起（config 配了 app_id/app_secret 才 spawn；否则 None）
     feishu_proc = _spawn_feishu(cfg)
 
+    # CLI server 由 run.py 代拉起（extension 能力的 HTTP 入口，:8769）。
+    # 无条件起 —— LLM 通过 exec_cli 调用 mono_* 子命令需要它。
+    cli_proc = subprocess.Popen(
+        [sys.executable, "-m", "extensions.cli.inner.server",
+         f"--host={cfg.server.host}", f"--port={cli_port}"],
+        stdout=sys.stdout, stderr=sys.stderr,
+    )
+    _log.info("[cli-server] spawned pid=%d on %s:%d", cli_proc.pid, cfg.server.host, cli_port)
+
     await session_mgr.start()
     try:
         await asyncio.gather(server.run(), health.run(), debug.run_server())
     finally:
         if feishu_proc is not None and feishu_proc.poll() is None:
             feishu_proc.terminate()
+        if cli_proc.poll() is None:
+            cli_proc.terminate()
+            try:
+                cli_proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                cli_proc.kill()
         await async_task_mgr.shutdown()  # 先收摊 async task（flush task.json）
         await session_mgr.stop()
         await server.stop()
@@ -519,5 +623,9 @@ if __name__ == "__main__":
             ports = tuple({args.server_port, *(p for p in ports if p != 8765)})
         if args.health_port is not None:
             ports = tuple({args.health_port, *(p for p in ports if p != 8767)})
+        if args.debug_port is not None:
+            ports = tuple({args.debug_port, *(p for p in ports if p != 8768)})
+        cli_port_env = int(os.environ.get("MONOX_CLI_PORT", "8769"))
+        ports = tuple({cli_port_env, *(p for p in ports if p != 8769)})
         sys.exit(stop_run(ports))
     asyncio.run(run(args.config, args))

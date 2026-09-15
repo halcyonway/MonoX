@@ -12,9 +12,9 @@
 
 # MonoX
 
-**A minimal, self-hosted Agent Runtime.** Modular by design — swap any component without touching the rest.
+**A minimal, self-hosted personal agent runtime.** Modular by design — swap any component without touching the rest.
 
-MonoX runs as a long-lived Python process speaking WebSocket. Channels, skills, and other harness extensions live in `extensions/` — completely decoupled from the core.
+MonoX runs as a long-lived Python process speaking WebSocket. Channels, skills, and other harness extensions live in `extensions/` — completely decoupled from the core. One runtime serves one user across sessions; the agent's role grows with the user's over time.
 
 ## Features
 

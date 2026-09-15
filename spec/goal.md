@@ -1,10 +1,10 @@
 # 长期目标
 
-MonoX 是一个**自托管最小 agent runtime core**。目标不是产品化 SaaS，而是一个干净的、可重写的、和云端 SaaS 解耦的代码骨架。
+MonoX 是一个**自托管最小个人 agent runtime core**。目标不是产品化 SaaS，而是一个干净的、可重写的、和云端 SaaS 解耦的代码骨架。它跑在一个用户本地，跨 session 长期服务这个用户；agent 的角色和它掌握的能力随用户的实际需要演化。
 
 ## 一句话目标
 
-> 让一个程序员能在周末 fork MonoX，5 分钟接入他手头的 LLM，跑通本地 coding agent；想替换任何部分（channel / LLM / 工具 / 存储）都能在 `extensions/` 里独立完成，不动 `core/`。
+> 让一个人能在本地起一个 MonoX，5 分钟接入他手头的 LLM，跑通一个会陪他一起成长的个人 agent；想替换任何部分（channel / LLM / 工具 / 存储）都能在 `extensions/` 里独立完成，不动 `core/`。
 
 ## 设计哲学
 

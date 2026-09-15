@@ -16,11 +16,18 @@ MonoX 是一个自托管的 agent runtime。本文档是架构的唯一权威说
 
 ## 2. 架构总览
 
-MonoX 由 **Runtime 进程** + **N 个 Channel 进程**组成：
+MonoX 由 **Runtime 进程** + **N 个 Channel 进程** 组成。Runtime 进程内除核心
+loop / session manager 外，还装配若干**同生命周期**的 HTTP/WS 子服务：
 
 - **Runtime 进程**（`python run.py`）：`SessionManager`（多 LoopEngine + idle 销毁
   + checkpoint 恢复）+ `RuntimeServer`（多 session_key ws 索引 + last_active_source
-  fan-out）+ `HealthServer`（`GET /health`）；**对 channel 类型一无所知**，只接 ws 帧
+  fan-out）+ 三个同生命周期子服务：
+  - `HealthServer`（`GET /health`，http :8767）
+  - `DebugServer`（observability 入口，http :8768）
+  - **`Extension CLI Server`**（`python -m extensions.cli.inner.server`，http :8769）——LLM 通过 `bash` 工具调 `exec_cli mono_<name>` → subprocess 调 urllib → HTTP POST 到 :8769。
+    `run.py` 启动时 spawn 它，shutdown 时 SIGTERM → 2s 超时 → SIGKILL 一起收摊。
+    详见 `requirements/extension-cli-server.md`。
+  **对 channel 类型一无所知**，只接 ws 帧
 - **Channel 进程**（每个 `extensions/channels/<name>/__main__.py` 一个）：拉起一个
   channel adapter（monoDesk ws server / terminal stdio TUI / feishu lark / textual
   TUI）+ 一个 `RuntimeWSClient` 连 Runtime；channel-specific 依赖只在该进程加载
@@ -50,6 +57,15 @@ MonoX 由 **Runtime 进程** + **N 个 Channel 进程**组成：
 │   ┌────────────────┐  http (:8767)    │               │
 │   │ HealthServer   │  GET /health →   │               │
 │   └────────────────┘  {sessions:[…]}  │               │
+│                                       │               │
+│   ┌────────────────┐  http (:8768)    │               │
+│   │ DebugServer    │  observability   │               │
+│   └────────────────┘                  │               │
+│                                       │               │
+│   ┌────────────────┐  http (:8769)    │               │
+│   │ Extension CLI  │  POST /cli/<sub> │               │
+│   │ Server         │  ←── exec_cli    │               │
+│   └────────────────┘  ←── LLM bash    │               │
 └───────────────────────────────────────────────────────┘
 
    Channel 进程 (×N，每个独立)：
@@ -86,8 +102,13 @@ run_channel），不属于 core。
 | 层 | 职责 | 是否可换 |
 |---|---|---|
 | `core/` | 稳定内核：协议 + ReAct 引擎 + 存储/执行抽象。零 UI / 零 IM / 零 LLM SDK | 稳定，不轻易改 |
-| `extensions/` | 适配层：channel adapter、skill | 可随意重写 |
-| `run.py` | 装配层：实例化具体实现，注入 core | 每用户可改 |
+| `extensions/` | 适配层：channel adapter、skill、CLI atomic capability | 可随意重写 |
+| `run.py` | 装配层：实例化具体实现 + 拉起同生命周期子服务（health / debug / CLI server），注入 core | 每用户可改 |
+
+> **同生命周期子服务归 Runtime 管**：health / debug / CLI server 都是 Runtime 进程的
+> 子进程，stdout/stderr 共享、`run.py --stop` 一起收——和 channel 进程（独立进程 +
+> `RuntimeWSClient` 连 Runtime）**完全不同的关系**。详见
+> `requirements/extension-cli-server.md` §"Runtime spawn CLI server 的语义"。
 
 ---
 
@@ -256,12 +277,22 @@ InboundEvent
 |---|---|---|
 | `channels/<name>/` | 每个 channel 一个包（`monodesk` / `terminal` / `feishu` / `textual_chat`），含 `__main__.py` + `__init__.py` | 实现 `Channel`，由 `__main__.py` 起独立进程 |
 | `channels/_runtime.py` | 共享 mini-runtime helper（`run_channel(channel, ws_client)` 起 channel + 双 pump gather） | 私有 helper，不属于 core |
-| `skills/<name>/` | git-tracked 公共 skill（SKILL.md + 配套脚本 / templates） | source of truth；sync 到 `.monox/skills/` |
+| `cli/inner/` | CLI HTTP server + exec_cli 客户端 + registry + envelope utils | 基础设施，不放业务 |
+| `cli/<capability>/` | 每个 capability 一个目录（`search` / `i2i` / `asr` ...），含 `__init__.py`（register）+ `main(args)` handler | 业务实现；import 即注册到 registry |
+| `skills/<name>/` | git-tracked 公共 skill（SKILL.md） | 知识载体；tier=1 注入 system prompt，tier=2 grep 发现 |
 
 ### 9.1 Skill source of truth 与 sync 语义
 
-**`extensions/skills/<name>/` 是 skill 的 source of truth**。`.monox/skills/<name>/`
-是运行时副本（gitignored），`SkillService` 只读 runtime 那份。
+**`extensions/skills/<name>/` 是 skill 的 source of truth**——只含 `SKILL.md`
+（知识载体，LLM 读这个学会调用什么 CLI）。`.monox/skills/<name>/` 是运行时副本
+（gitignored），`SkillService` 只读 runtime 那份。
+
+**helper script 不再放 skills/**：早期版本（pre-PR-#11）i2i/asr 的 helper script
+跟 SKILL.md 一起放 `extensions/skills/<name>/<script>.py`。PR #11 把所有 helper
+迁到 `extensions/cli/<name>/`，SKILL.md 改成教 LLM 调 `exec_cli mono_<name>`。
+这一分离的理由：skill 是「知识」，CLI 是「代码」——前者 LLM 读，后者 agent 通过
+bash 调。混在一起会让 SKILL.md 变成命令清单、且 helper 改完要重启 runtime 才能
+生效（CLI server 独立进程则不需要）。
 
 `run.py` 启动时调 `core.skill_sync.sync_extension_skills()`：
 
@@ -272,13 +303,17 @@ InboundEvent
 | 不存在 | ❌ | 不动；runtime 里没有这个 skill 是用户的决定 |
 | extensions 不存在 | n/a | 静默跳过（公共 skill 库是可选的） |
 
-**用户工作流**：改任何 skill（写 prompt、加 helper script、调 frontmatter）都改
-`extensions/skills/<name>/` 那份。改完重启 runtime，sync 把更新同步过来。
-不要直接改 `.monox/skills/` —— 下次启动还是会被 extensions 覆盖回老版本。
+**用户工作流**：改 SKILL.md（教 LLM 怎么用 CLI）改 `extensions/skills/<name>/`
+那份；改 CLI handler 改 `extensions/cli/<name>/` 那份——前者要 restart runtime
+才生效（skill sync），后者只要 restart CLI server（`kill <server_pid> && uv run
+python -m extensions.cli.inner.server &`）。
 
 新增 channel：在 `extensions/channels/<name>/` 加包 + 实现 `Channel`，启动用
 `uv run python -m extensions.channels.<name> --runtime-url=...`。`extensions/channels/_runtime.py`
 的 `run_channel` 自动串好 ws pump。
+新增 capability CLI：放 `extensions/cli/<name>/<module>.py`（实现 `main(args) -> dict`）
++ 一行 `import` 在 `extensions/cli/inner/server.py:bootstrap_builtins()` +
+`extensions/skills/<name>/SKILL.md`（tier=1，教 LLM 调 `exec_cli mono_<name>`）。
 新增 skill：放 `extensions/skills/<name>/SKILL.md`（git track），不需要手动拷到
 `.monox/skills/` —— 启动时 sync 自动铺平。
 
