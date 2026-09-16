@@ -18,6 +18,8 @@ import logging
 import time
 from typing import Any
 
+import httpx
+
 _log = logging.getLogger("monox.loop.engine")
 
 from core.loop.compression import CompressionService
@@ -51,6 +53,17 @@ WAIT_IO_NAME = "wait_io"
 
 # _react 被中断时返回的哨兵 final_text；run() 据此走中断清理而不是 FinalMessage。
 _INTERRUPTED = "__interrupted__"
+
+# LLM 网络错（httpx + python builtin）。retry_stream 兜底走"system note 反馈给
+# LLM 自我恢复"路径，不 abort run；不在这里的不走 retry，由外层 except 走 fatal
+# ErrorEvent（见 requirements/llm-error-recovery.md）。
+_RETRY_EXCEPTIONS = (
+    httpx.HTTPStatusError,    # HTTP 4xx/5xx
+    httpx.RequestError,       # 连接错 / socket reset / TLS
+    httpx.TimeoutException,   # connect / read / pool timeout
+    ConnectionError,          # python builtin 兜底
+    OSError,                  # socket 资源耗尽
+)
 
 # fork_task 这类 tool 需要知道「当前在哪个 session 里执行」——Tool 协议签名没有
 # session 上下文，ToolRegistry 又是全 session 共享的。engine 在 tool dispatch 处
@@ -245,13 +258,17 @@ class LoopEngine:
                             self._step_task = None
                             continue
                         except Exception as exc:
-                            # LLM / 工具异常兜底：不能让异常杀死 run() 循环，
-                            # 否则 input_q 再无人消费 → 中断失效、UI 永远 thinking。
-                            _log.exception("react step failed: %r", exc)
+                            # 真正的编程错（不是 LLM 网络错 —— 网络错在 _react 内层
+                            # 已被 retry_stream + system note 路径吸收，不走到这里）：
+                            # fatal 兜底。不能让异常杀死 run() 循环，否则 input_q
+                            # 再无人消费 → 中断失效、UI 永远 thinking。
+                            # code="internal_error"（之前是 "llm_error"，但 LLM 网络错
+                            # 已不再走这里，语义修正）。
+                            _log.exception("react step failed (fatal): %r", exc)
                             await output_queue.put(ErrorEvent(
-                                code="llm_error",
+                                code="internal_error",
                                 msg=f"{type(exc).__name__}: {exc}",
-                                retryable=True,
+                                retryable=False,
                             ))
                             await finalize_aborted("error")
                             self._step_task = None
@@ -444,7 +461,13 @@ class LoopEngine:
             )
             try:
                 opts = {"model_provider": self._model_provider} if self._model_provider else None
-                async for chunk in self._llm.stream(messages, tools=tool_schemas, options=opts):
+                # LLM 网络错自动重试 3 次（指数退避 1s/2s/4s），不 abort run。
+                # 详见 spec/requirements/llm-error-recovery.md。
+                from core.llm_proxy.retry import retry_stream
+                stream_iter = retry_stream(
+                    lambda: self._llm.stream(messages, tools=tool_schemas, options=opts),
+                )
+                async for chunk in stream_iter:
                     # C3：流式消费循环内协作检查中断——毫秒级响应，不依赖外部 cancel。
                     # 已发出的 token 由 run() 的回滚 + idle 兜底（与 cancel 路径一致）。
                     if not interrupt_queue.empty():
@@ -480,8 +503,45 @@ class LoopEngine:
                         finish_reason = chunk.finish_reason
                     if chunk.usage:
                         usage = chunk.usage
+            except _RETRY_EXCEPTIONS as exc:
+                # 重试 3 次仍失败 → 把错当 system note 反馈进 messages，让 LLM 在下一
+                # 轮 react 自我决策（再试 / 改 prompt / 解释给用户）。**不** abort run，
+                # **不**发 fatal ErrorEvent。已 emit 的 ToolStart 由下一轮 react 自然补救
+                # （LLM 看到 system note 后会重新决策 tool 调用）；MonoDesk 端 onToolEnd
+                # 的 call_id 匹配兜底处理残留 running 块（见 fix-tool-end-on-interrupt.md）。
+                _log.warning(
+                    "llm stream failed permanently after retries: %s — "
+                    "appending system note for self-recovery (no run abort)",
+                    type(exc).__name__,
+                )
+                if self._traces is not None and self._current_turn_id is not None:
+                    await self._traces.record_llm_span(
+                        self._current_turn_id,
+                        model=_llm_model(self._llm),
+                        messages=messages,
+                        response_text=full_text,
+                        reasoning_content=reasoning_text or None,
+                        usage=usage,
+                        finish_reason=finish_reason,
+                        latency_ms=int((time.monotonic() - t0) * 1000),
+                        status="error",
+                    )
+                self._messages.append({
+                    "role": "user",
+                    "content": (
+                        f"[system note] LLM call failed 3 times: {type(exc).__name__}: {exc}. "
+                        f"The provider is temporarily unreachable. Try a different approach "
+                        f"(simpler request / shorter prompt / different tool sequence), or "
+                        f"explain the situation to the user honestly."
+                    ),
+                })
+                # 让 _react 以"空 assistant message"返回；run() 看到 return "" 不会走
+                # finalize_aborted，主循环继续走下一轮 react step，LLM 看到 system note
+                # 自我恢复。
+                return ""
             except Exception as exc:
-                # 可观测性：LLM 失败也记一条 reasoning span，状态=error。
+                # 真正的编程错（不是网络错）—— record trace + 让外层 except 走 fatal
+                # ErrorEvent("internal_error") + finalize_aborted。
                 if self._traces is not None and self._current_turn_id is not None:
                     await self._traces.record_llm_span(
                         self._current_turn_id,
@@ -643,6 +703,35 @@ class LoopEngine:
                     _cv_token = _current_session_key.set(self._session_key)
                     try:
                         result = await tool.execute(call_id, args)
+                    except asyncio.CancelledError:
+                        # interrupt 传播到这里：ToolStart 已经发了但 ToolEnd 没发，UI tool block
+                        # 会卡在 running —— 必须补一条 cancelled ToolEnd 把状态收尾（详见
+                        # spec/requirements/fix-tool-end-on-interrupt.md）。CancelledError
+                        # 在 Python 3.8+ 继承 BaseException 不属于 Exception，必须独立 catch。
+                        # _cv_token reset 交给下面 finally（这里不 reset，避免 double reset）
+                        latency_ms = int((time.monotonic() - t0) * 1000)
+                        cancelled_result = ToolResult(
+                            call_id=call_id,
+                            status="cancelled",
+                            stdout="",
+                            stderr="[interrupted] tool execution cancelled by user",
+                            exit_code=-1,
+                        )
+                        await output_queue.put(ToolEnd(
+                            name=name,
+                            result=cancelled_result,
+                            latency_ms=latency_ms,
+                        ))
+                        if self._traces is not None and self._current_turn_id is not None:
+                            await self._traces.record_act_span(
+                                self._current_turn_id,
+                                tool_name=name,
+                                args=args,
+                                result=_tool_result_to_dict(cancelled_result),
+                                latency_ms=latency_ms,
+                                status="cancelled",
+                            )
+                        raise  # 继续传播，让外层 run() 走 finalize_aborted("cancelled")
                     except Exception as exc:
                         # 自定义 tool 实现可能直接 raise（非返回 status=error 的 ToolResult）。
                         # 这里兜住，保证 trace 里能看到这条失败调用。

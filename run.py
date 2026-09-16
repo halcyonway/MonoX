@@ -40,6 +40,7 @@ from core.llm_proxy import LlmProxy
 from core.loop import (
     BashTool,
     MultimodalUnderstandTool,
+    ReadDocTool,
     ReadToolResultBudgetTool,
     SkillLoadTool,
     ToolRegistry,
@@ -89,13 +90,12 @@ calls), then wait for N `async-task-result` events. Don't serialize.
 the subagent's final message IS the deliverable. A subagent that ends its
 turn via `wait_io` is marked completed with a partial result.
 
-You can receive images as <attachment url="..."> elements in user events. To understand an image, call multimodalunderstand(attachment_url="...") with the file path or URL shown in the attachment's `url` attribute.
+You can receive images as <attachment path="..."> elements in user events. The `path` is a local absolute file path. To understand an image, call multimodalunderstand(attachment_url="<path>") — pass the `path` attribute value as-is.
 
 ## Image preview — show, don't just describe
 
 When you generate, reference, or otherwise surface an image, embed it with markdown
-image syntax `![alt](url)` so MonoDesk renders it inline. Plain text like
-`输出路径: /path/xxx.png` or `链接: https://...` will NOT preview — the UI only
+image syntax `![alt](path)` so MonoDesk renders it inline. Use the local `path` (Tauri loads it via asset protocol). Plain text like `输出路径: /path/xxx.png` or `链接: https://...` will NOT preview — the UI only
 honors the `![alt](url)` markdown form.
 
 **Three URL flavors, three rules:**
@@ -107,24 +107,16 @@ honors the `![alt](url)` markdown form.
    ![风格化结果](https://dashscope-...xxx.png)
    ```
 
-2. **Local debug attachment (good):** Files already at
-   `http://127.0.0.1:8768/debug/attachments/<filename>` (user-attached images, or
-   files you uploaded yourself). Embed directly:
+2. **Local attachment (good):** user-attached files are uploaded to a local
+   tmp dir; the attachment's `path` attribute (or `path` field) is the local
+   absolute file path. Tauri loads it via asset protocol, so embedding the
+   `path` directly renders inline:
    ```
-   ![原始图](http://127.0.0.1:8768/debug/attachments/abc123.png)
+   ![原始图](/Users/.../.monox/tmp/attachments/xxx.png)
    ```
 
-3. **Local file path (won't work as-is):** `file:///...` or
-   `/Users/.../workspace/i2i/xxx.png` — MonoDesk runs in browser/Electron and
-   `file://` is blocked by CORS; absolute paths aren't fetchable. If you only have a
-   local path, upload first:
-   ```sh
-   curl -s -X POST --data-binary @"<path>" \
-        -H "Content-Type: image/png" \
-        http://127.0.0.1:8768/debug/attachments/upload
-   # → {{"url": "http://127.0.0.1:8768/debug/attachments/<uuid>.png", "kind": "image", ...}}
-   ```
-   Then embed the returned `url` field.
+3. **Local file path (also works):** any local absolute path under the
+   workspace is fine — Tauri loads via asset protocol, no upload needed.
 
 **`mono_i2i apply` / `mono_i2i raw` output specifically:** response includes both
 `saved_path` (local, won't preview) and `image_url` (OSS, 24h valid). Always embed
@@ -147,6 +139,28 @@ Examples:
 - Same applies to plain `[link](<url>)` if the URL is long.
 
 Tool results may be L1-compressed; if you see budget_id, call read_tool_result_budget(budget_id=...) for the full version.
+
+## Reading documents
+
+Use `read_doc` for attached documents (PDF / txt / md / csv / json) — it
+extracts text via `pypdf` (cheap, offline). Reserve `multimodal_understand`
+for images, and for scanned PDFs where `read_doc` returns empty stdout
+(no text layer — fall back to vision OCR).
+
+## bash tool `target` field (MonoDesk display)
+
+When you call `bash`, fill the optional `target` parameter with a one-line
+human-readable summary of what the command does — MonoDesk shows it next to
+the BASH label so the user can scan a long tool sequence at a glance.
+
+- Keep it under ~10 Chinese characters (or ~30 ASCII). MonoDesk truncates
+  beyond that, but writing long wastes tokens.
+- Describe the *intent* (what / why), not the command itself.
+  - Good: "列出 workspace 内容" / "run unit tests" / "install pypdf"
+  - Bad:  "ls -la workspace" (echoes cmd) / "ls" (too vague)
+- If unsure, skip it — `target` is optional. MonoDesk falls back to the
+  first ~30 chars of `cmd` when `target` is missing.
+- `target` is display-only; the tool itself ignores it.
 
 When you are done with the current turn and ready to receive the next message, call wait_io. If the user sends a new message while you are mid-task, it will be appended to the conversation and you can keep going.
 
@@ -468,6 +482,7 @@ async def run(cfg_path: str, args: argparse.Namespace) -> None:
             BashTool(runner, paths["workspace"]),
             SkillLoadTool(skill_service),
             MultimodalUnderstandTool(),
+            ReadDocTool(paths["workspace"]),
             WaitIoTool(),
             budget_tool,
         ]

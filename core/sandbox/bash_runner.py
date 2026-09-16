@@ -30,8 +30,24 @@ class BashRunner(SandboxRunner):
             stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         except asyncio.TimeoutError:
             proc.kill()
-            await proc.wait()
+            try:
+                await proc.wait()
+            except Exception:
+                pass
             return SandboxResult(stdout="", stderr=f"timeout after {timeout}s", exit_code=124)
+        except asyncio.CancelledError:
+            # interrupt 传播到 communicate() —— 必须主动 kill 否则子进程变孤儿
+            # （spec/requirements/fix-tool-end-on-interrupt.md）。继续传播让上层的
+            # engine CancelledError catch 发 cancelled ToolEnd。
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            try:
+                await proc.wait()
+            except Exception:
+                pass
+            raise
 
         return SandboxResult(
             stdout=stdout_b.decode(errors="replace"),

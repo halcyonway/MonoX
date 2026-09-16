@@ -9,12 +9,21 @@ https://platform.minimaxi.com/docs/api-reference/text-openai-api
 Image is sent as:
 - URL: `image_url` with `url` field → for HTTP URLs
 - base64: `image_url` with `url: f"data:{mime};base64,{b64}"` → for local files
+
+# #53 (attachment-local-path): debug server upload endpoint 返回的 URL
+# `http://127.0.0.1:8768/debug/attachments/xxx.png` 跟我们自己 process 同 host
+# 同 port，但 Tauri WebView / 某些 proxy 场景下从 process 内 requests.get 这个 URL
+# 会 ReadTimeout（事件循环里 fetch 自己起的 server 容易撞 event loop / 端口转发）。
+# 解决：把 attachments_root 注入 tool，遇到 debug server URL 时反推本地 path，
+# 直接 open() 读 bytes，不再走 fetch。audio / pdf 走类似逻辑（debug_server 已经
+# 对 audio 返回 path 字段，pdf/其它还在 url-only 阶段——先解决 image 阻塞点）。
 """
 from __future__ import annotations
 
 import base64
 import os
 import re
+from pathlib import Path
 from typing import Any
 
 import requests
@@ -132,6 +141,7 @@ def _call_vision(image_url: str, prompt: str = "Describe this image in detail.")
 
 class MultimodalUnderstandTool:
     name = "multimodalunderstand"
+
     schema = {
         "type": "function",
         "function": {
@@ -149,9 +159,8 @@ class MultimodalUnderstandTool:
                         "type": "string",
                         "description": (
                             "URL or local file path of the image to analyze. "
-                            "Common case: an HTTP URL returned by the upload endpoint "
-                            "(e.g. http://127.0.0.1:8768/debug/attachments/abc123.png). "
-                            "Local file paths are also accepted for backwards compatibility."
+                            "Common case: the `path` field of an attachment in a user "
+                            "message (the file is already on disk locally)."
                         ),
                     },
                     "prompt": {
