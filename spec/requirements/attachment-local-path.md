@@ -1,143 +1,122 @@
-# attachment-local-path: multimodalunderstand 跳过 debug server fetch
+# attachment-local-path: wire frame 只传本地 path，不暴露 debug server URL
 
-> multimodalunderstand tool 在收到 debug server attachment URL 时反推本地 path，
-> 直接 open() 读 bytes，不再走 requests.get。解决同进程回环 debug server 的
-> `ReadTimeout` 问题（`#53`）。
->
-> 实现：
-> - `core/loop/tools/multimodal_understand.py`（`MultimodalUnderstandTool.__init__(attachments_root)` +
->   `_debug_server_path()` 反推）
-> - `run.py`（`run()` 注入 `attachments_root=Path(cfg.sandbox.tmp_root)`）
-> - `tests/test_multimodal_understand_path.py`（8 个 unit case 覆盖 happy / edge / security）
-
----
+> Attachment 在 wire frame 上只携带本地绝对 path（`path` 字段），不暴露
+> `http://127.0.0.1:<port>/debug/attachments/...` URL。LLM 拿到 attachment 后
+> 直接拿 `path` 调 read_doc / multimodalunderstand，工具走本地 IO；前端拿 `path`
+> 走 Tauri asset protocol 渲染。三方各取所需。
 
 ## 1. Context
 
-MonoX 接收 MonoDesk 上传的图片时，debug server 把 bytes 写到
-`{tmp_root}/attachments/<uuid>.<ext>` 然后返回 HTTP URL
-`http://<host>:<port>/debug/attachments/<uuid>.<ext>`。
+之前 attachment 在 wire frame 上同时带 `url` 和 `path`：
 
-LLM 看到 `url` 字段后调 `multimodalunderstand(attachment_url="http://127.0.0.1:8768/debug/attachments/abc.png")`。
-tool 内部用 `requests.get(url, timeout=30)` 抓 bytes。
+- `url` 是 debug server `http://127.0.0.1:8768/debug/attachments/<disk-file>`。
+  LLM 拿到后要么用 url 反推本地 path（_debug_server_path，复杂且易错），
+  要么直接传给工具（read_doc 报「path looks like a URL」）。
+- `path` 是音频 attachment 专属字段，image / pdf / doc 不填。
 
-**问题**：Tauri / 浏览器场景下，从 MonoX process 内 `requests.get` 自己起的
-`127.0.0.1:8768` server 经常 `ReadTimeout`（30s 超时）。现象：上传图片 → 调
-multimodal_understand → 等 30s → 报错。`#53`。
+**两个问题**：
 
-**根因**：Tauri WebView / 某些 proxy / 端口转发环境下，process 内的 HTTP 客户端
-对 localhost 自指请求不可靠。audio 走另一条路（debug server 直接返 `path` 字段，
-skill 用 `open(path)`），从来没事 —— 因为 **本地文件 IO 永远可达**。
-
-**修法**：把 `attachments_root` 注入 multimodal_understand，URL 形如
-`/debug/attachments/<fname>` 时反推 `{attachments_root}/attachments/<fname>` 走
-local 分支（`_image_b64` 走 `open().read()`），不调 `requests.get`。
+1. **跨工具的 path 解析各做各的**：multimodal_understand / read_doc / asr skill
+   各自判断 url 是不是 debug server 的、各自反推 path、各自处理 path traversal。
+   同一份 url 三处解析逻辑。
+2. **wire frame 上暴露 `127.0.0.1:8768`**：系统是 desktop local 的，wire 上不该
+   出现 loopback URL。LLM prompt / attachment XML / tool error 信息里写
+   `http://127.0.0.1:...` 是泄漏内部实现。
 
 ## 2. 设计
 
-### 2.1 MultimodalUnderstandTool 注入 attachments_root
+### 2.1 upload → 返回 `{path, name, mime, kind}`（无 url）
 
-`run.py` 的 `tools = ToolRegistry([...])` 改为：
-
-```python
-MultimodalUnderstandTool(attachments_root=Path(cfg.sandbox.tmp_root)),
-```
-
-`attachments_root` 必须跟 debug server 的 `attachments_root` **同源**（都是
-`cfg.sandbox.tmp_root`，否则反推路径会 404）。spec/rule.md 里 `sandbox.tmp_root`
-是 single source of truth。
-
-### 2.2 `_debug_server_path(url)` 反推规则
+`core/debug_server.py::_handle_attachment_upload` 的 payload 只含：
 
 ```python
-def _debug_server_path(self, url: str) -> Path | None:
-    if self._attachments_root is None:
-        return None
-    path_part = url.split("?", 1)[0].split("#", 1)[0]
-    marker = "/debug/attachments/"
-    idx = path_part.find(marker)
-    if idx < 0:
-        return None
-    fname = path_part[idx + len(marker):]
-    if not fname or "/" in fname or "\\" in fname or fname.startswith("."):
-        return None
-    candidate = self._attachments_root / "attachments" / fname
-    return candidate if candidate.is_file() else None
+{
+    "path": str(saved_path),         # 本地绝对路径
+    "name": display_name,            # 原名（中文 / 空格保留）
+    "mime": mime,
+    "kind": kind,                    # image / audio / other
+}
 ```
 
-**8 条规则**（unit test 覆盖）：
-
-| 场景 | 返回 |
-|---|---|
-| URL 是 debug server 形式 + 本地文件存在 | `Path`（走 local） |
-| URL 是 debug server 形式 + 本地文件不存在 | `None`（fallback fetch） |
-| URL 不是 debug server 形式（internet URL） | `None`（原 fetch） |
-| filename 含 `/` 或 `\`（path traversal） | `None` |
-| filename 为空 | `None` |
-| filename 以 `.` 开头（隐藏文件） | `None` |
-| `attachments_root=None`（旧代码 back-compat） | 全部 `None` |
-| URL 带 query string / fragment | 仍能匹配（先 strip） |
-
-**安全考量**：
-
-- `fname` 不含 `/` `\` `.` 开头 —— 阻止 `../../etc/passwd` 这类 path traversal escape `attachments_root`
-- `attachments_root=None` 时工具完全跳过反推 —— 旧测试 / 旧调用方零改动
-- 只在 file 存在时返回 —— 进程重启 / 文件被 GC 兜底走 fetch，行为不破
-
-### 2.3 execute() 路由
+**disk 文件名** = sanitize 后的原名 + ext（不拼 uuid，不重命名）。
 
 ```python
-local_path = self._debug_server_path(url)
-effective = str(local_path) if local_path else url
-description = _call_vision(effective, prompt)
+filename = f"{original_name}{ext}" if original_name else f"{uuid.uuid4().hex}{ext}"
 ```
 
-`_call_vision` 已有 `image_url` 是 local path 时走 `_image_b64(path)` 的分支
-（line 95-102），不动。
+`original_name` 来自 `X-Filename` header（浏览器 raw body 上传没法用
+Content-Disposition）。`_sanitize_filename` 剥路径分隔符 + 不可打印字符，保留
+中文 / 空格 / emoji。
 
-### 2.4 不变（明确范围）
+无原名时（drag without filename 边界 case）退回到 `<uuid><ext>`，避免重名覆盖。
 
-- `_call_vision` / `_fetch_b64` / `_image_b64` 不动
-- tool schema 不变（`attachment_url` 字段名 + 描述不变）
-- audio 处理路径不动（debug server 已经对 audio 返回 `path` 字段，
-  server-side skill 直接 open()）
-- Wire protocol（`Attachment` type）不动 —— 这是 server-side tool 的反推，
-  前端不需要新字段
-- read_doc 工具（已删除）不动
+### 2.2 wire frame 只透传 path
 
-## 3. 验证
+`core/protocol/wire_frames.py`：
 
-### 3.1 单元测试
+- **frame_to_inbound**（client → runtime）：attachment 必备 `path` 字段。无
+  `path` 直接跳过（不是有效 attachment）。`File.content` 不再写 url 字节。
+- **inbound_to_frame**（runtime → channel）：attachment 输出 `{path, name,
+  mime, kind}`，不写 `url`。
 
-`uv run pytest tests/test_multimodal_understand_path.py -v` —— 期望 8/8 pass。
+`core/loop/event_format.py::_attachment_xml` 渲染 `<attachment path="..."/>`
+（不是 `url="..."`），LLM context 里只看到本地 path。
 
-### 3.2 全量测试
+### 2.3 工具不再做 URL 反推
 
-`uv run pytest tests/ -q` —— 期望 347+ passed（8 个新 case 加进去；其它不破）。
+- **multimodalunderstand**：撤回 `_debug_server_path()`。`execute()` 直接传
+  path 给 `_call_vision`，_call_vision 内部走 `_image_b64(open(path))`。不再
+  注入 `attachments_root`，不再有反推逻辑。
+- **read_doc**：维持 path / url 拦截原状，错误信息改为「use the `path` field
+  from the attachment element」。
 
-### 3.3 手工 e2e
+### 2.4 前端渲染
 
-1. 启动 MonoX runtime + MonoDesk。
-2. 上传一张 PNG（drag & drop 或 file picker）→ user message bubble 出现缩略图
-   （由 MonoDesk 那边 `attachment-routing.md` 走 `<img>`）。
-3. 让 agent 调 multimodalunderstand → 不再 ReadTimeout；2-3s 内返回图像描述。
+`MonoDesk` Conversation 收到 attachment（`{path, name, mime}`）后用
+`convertFileSrc(path)`（Tauri asset protocol）转 `asset://...`，`<img>` 直接渲染。
+Dev browser fallback `file://${path}`。
+
+## 3. 不变量
+
+- LLM 视角的 attachment 永远是 `<attachment path="..." />`，不再含 `http://`
+- 磁盘文件名 = 原名（中文 / 空格保留），LLM 直接 `<attachment path="..." />`
+  读到的就是用户上传的文件本身
+- 上传通道保留在 debug server（独立进程的 IPC 通道，bytes 必须经过 HTTP
+  POST），但响应 payload 不再含 wire-visible URL
+- `read_doc` URL 拦截逻辑保留（防御性，挡 internet URL）
 
 ## 4. 文件清单
 
 ### 修改
 
-- `core/loop/tools/multimodal_understand.py` — `__init__(attachments_root)` 注入；
-  `_debug_server_path()` 反推；`execute()` 用 `effective` 路由；docstring 加 #53 引用
-- `run.py` — `MultimodalUnderstandTool(attachments_root=Path(cfg.sandbox.tmp_root))`
+- `core/debug_server.py` — `disk_name` 改原名 + ext；payload 不含 url；`X-Filename`
+  header 解析
+- `core/protocol/wire_frames.py` — `frame_to_inbound` 要求 path；`inbound_to_frame`
+  输出不含 url；`_file_to_dict` path 独立字段
+- `core/loop/event_format.py` — `_attachment_xml` 渲染 `path` 属性
+- `core/loop/tools/multimodal_understand.py` — 撤回 `_debug_server_path` 反推
+- `core/loop/tools/read_doc.py` — URL 拦截错误信息更新
+- `core/loop/event_format.py` EVENT_SCHEMA_DOC — attachment 说明用 path
+- `run.py` — system prompt 改用 path；`MultimodalUnderstandTool()` 不再传
+  `attachments_root`
+- `MonoDesk/src/ws/protocol.ts` — `Attachment.url` → `Attachment.path`
+- `MonoDesk/src/components/Composer.tsx` — 上传读 `json.path`
+- `MonoDesk/src/components/Conversation.tsx` — `<img src={convertFileSrc(path)}>`
+- `MonoDesk/src/components/Composer.tsx` — `VITE_DEBUG_URL` → `VITE_MONOX_UPLOAD_URL`
 
-### 新增
+## 5. 验证
 
-- `tests/test_multimodal_understand_path.py` — 8 case（happy / edge / security）
-- 本 spec 文档
+### 5.1 e2e 手工
 
-### 不动
+1. 启动 MonoX runtime + MonoDesk。
+2. 上传 `心洲科技公司介绍 .pdf` → bubble 显示文件名 + pdf icon（不是 broken image）
+3. 让 agent 读 PDF → LLM 调 `read_doc(path="<attachment path>")` → 读出 PDF 文字
+4. wire frame 日志（debug server 开启）确认 attachment 是 `<attachment path="..." />`
 
-- `core/debug_server.py`（audio 已返 path；image/pdf/doc 仍只返 url 暂时 OK，
-  后续如果要节省前端 fetch 也可加 path 字段，但跟本 spec 解耦）
-- Wire protocol（`Attachment` type）
-- 前端任何代码
+### 5.2 不再 127
+
+```bash
+grep -rn "127.0.0.1" core/loop/event_format.py run.py
+```
+
+LLM 视角可见的文件里无 127 字样。

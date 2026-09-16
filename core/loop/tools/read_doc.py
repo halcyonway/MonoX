@@ -181,6 +181,8 @@ class ReadDocTool:
         # 之前会被静默拼到 workspace 后面（workspace/http:/127.0.0.1:...），
         # 再 stat() → file not found，stderr 信息没用。
         # 这里显式拦下，告诉 agent 下一步：先 curl 下来再传 path。
+        # 注：wire frame 上 attachment 自带本地 path 字段（debug_server upload 时返回），
+        # LLM 应该用那个 path 而不是 url。
         lowered = path_arg.lower()
         if (
             lowered.startswith("http://")
@@ -197,8 +199,8 @@ class ReadDocTool:
                     f"Download first with `bash`, e.g.:\n"
                     f"  curl -sSL -o $WORKSPACE/file.pdf '{path_arg}'\n"
                     f"  read_doc(path=\"$WORKSPACE/file.pdf\")\n"
-                    f"For debug-server attachments (http://127.0.0.1:8768/debug/attachments/<id>), "
-                    f"the file is already on the server — use `bash` with `curl` to fetch it locally."
+                    f"For attachments, use the `path` field from the attachment element — "
+                    f"the file is already on disk locally."
                 ),
                 exit_code=1,
             )

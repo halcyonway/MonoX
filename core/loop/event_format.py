@@ -119,29 +119,23 @@ def tool_result_event_xml(call_id: str, result: ToolResult, *, tool: str | None 
 def _attachment_xml(f: File) -> str:
     """File → <attachment> element.
 
-    优先级：
-      1. File.path 字段（本地绝对路径，给音频等 skill 处理的附件用）
-      2. File.content 存 URL 字符串（http/https/file path，兼容历史格式）
-      3. 否则 base64 编码 File.content（真正的文件字节）
-
-    1/2 都渲染为 url 属性（不写 base64，节省 token，LLM 可直接调本地脚本）。
+    - File.path 存在 → 渲染 `path` 属性（本地绝对路径，LLM 拿来直接调 read_doc）。
+    - 否则 File.content 当 URL / 路径字符串 → 渲染 `url` 属性（向后兼容）。
+    - 否则 base64 编码 File.content 嵌入 body。
     """
-    # 优先：File.path 字段（音频 attachment 走这条）
     if f.path:
-        head = _attrs({"name": f.name, "mime": f.mime, "url": f.path})
+        head = _attrs({"name": f.name, "mime": f.mime, "path": f.path})
         return f"<attachment{head} />"
 
     url_bytes = f.content or b""
     try:
         url_str = url_bytes.decode("utf-8")
-        # 看起来像 URL → 渲染为 url 属性
         if url_str.startswith("http://") or url_str.startswith("https://") or url_str.startswith("/"):
             head = _attrs({"name": f.name, "mime": f.mime, "url": url_str})
             return f"<attachment{head} />"
     except UnicodeDecodeError:
         pass
 
-    # 不是 URL 字符串 → base64 编码（真正的文件内容）
     import base64
     b64 = base64.b64encode(url_bytes).decode("ascii")
     head = _attrs({"name": f.name, "mime": f.mime})
@@ -170,13 +164,10 @@ User-side events:
   - `channel`: source identifier (monodesk / terminal / async_task / etc.).
   - `event_type`: sub-classification (user-input / scheduled-task /
     async-task-result / ...).
-  - `<attachment>`: file reference. `name` is original filename; `mime` is MIME
-    (e.g. `image/png`, `audio/mp4`); `url` is a local absolute path or HTTP URL
-    the file lives at. For images you can call
-    `multimodalunderstand(attachment_url="/path/to/file")` to analyze it.
-    For audio (and other skill-handleable files), call the matching skill
-    directly — e.g. `asr transcribe <path>`. Skills persist results locally so
-    you don't re-call the API for the same file.
+  - `<attachment>`: file reference. `name` is the original filename;
+    `mime` is MIME (e.g. `image/png`, `application/pdf`); `path` is the
+    LOCAL absolute path on disk — pass it directly to `read_doc(path=...)`
+    or `multimodalunderstand(attachment_url=...)`. Do not pass URLs.
 
 Tool-side events (in `role=tool` messages):
   <event kind="tool_result" call_id="c1" status="ok" exit_code="0"

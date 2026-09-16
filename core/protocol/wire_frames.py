@@ -117,17 +117,17 @@ def _decode_bytes(b: bytes) -> str:
 
 def _file_to_dict(f: File) -> dict[str, Any]:
     d: dict[str, Any] = {"name": f.name, "mime": f.mime, "content": _decode_bytes(f.content)}
-    # path + kind 是 audio attachment 等本地落盘文件专用的字段
-    # （image attachment 不会填，wire 兼容）。
+    # path 是所有 attachment 都填的本地绝对路径（debug server 上传后落地），
+    # LLM 拿 path 直接传给 read_doc / multimodalunderstand。
+    # kind 让前端按类型渲染（image / audio / other）。
     if f.path is not None:
         d["path"] = f.path
-        # kind 推断：mime audio/* → audio；image/* → image；否则 other
-        if f.mime.startswith("audio/"):
-            d["kind"] = "audio"
-        elif f.mime.startswith("image/"):
-            d["kind"] = "image"
-        else:
-            d["kind"] = "other"
+    if f.mime.startswith("audio/"):
+        d["kind"] = "audio"
+    elif f.mime.startswith("image/"):
+        d["kind"] = "image"
+    else:
+        d["kind"] = "other"
     return d
 
 
@@ -412,27 +412,25 @@ def from_frame(
 
         # attachments: list of {url, name?, mime?, path?, kind?} → tuple[File, ...]
         # MonoDesk 上传文件到本地路径后，通过 ws 帧发送 url/path 过来。
-        # - image 类：只填 url（HTTP URL 给 vision API）
-        # - audio 类：url + path（HTTP 用来 serve 给前端播放，path 给 server skill 处理）
+        # attachments：MonoDesk 上传后 debug server 返回 {path, name, mime, kind}，
+        # 通过 ws frame 透传到 Runtime。path 是核心字段，没有 path 的 attachment 跳过。
+        # 历史 url 字段作为 fallback（兼容旧 client），不再写入。
         raw_attachments: list[dict[str, Any]] = data.get("attachments") or []
         attachments: list[File] = []
         for a in raw_attachments:
             if not isinstance(a, dict):
                 continue
-            url = a.get("url")
-            if not isinstance(url, str) or not url:
-                # 没 url 也不算 attachment（兼容老 client）
+            path_raw = a.get("path")
+            path = path_raw if isinstance(path_raw, str) and path_raw else ""
+            if not path:
                 continue
             mime = a.get("mime")
             if not isinstance(mime, str) or not mime:
-                # 没 mime 时按 kind 猜：audio → audio/mp4；image → image/png
                 kind = a.get("kind")
                 mime = "audio/mp4" if kind == "audio" else "image/png"
-            path_raw = a.get("path")
-            path = path_raw if isinstance(path_raw, str) and path_raw else None
             attachments.append(File(
-                name=a.get("name") or url,
-                content=url.encode("utf-8"),
+                name=a.get("name") or path,
+                content=b"",
                 mime=mime,
                 path=path,
             ))
@@ -482,20 +480,17 @@ def inbound_to_frame(event: InboundEvent, seq: int = 0) -> dict[str, Any] | None
     - 其他 → None
     """
     if event.kind == "message":
-        # attachments: File.content 存 url 字节，encode 成字符串透传
-        # audio 类 File 有 path 字段，原样透传（audio skill 直接读本地文件）
+        # attachments：File.path 是本地绝对路径，LLM 拿来直接调 read_doc / multimodalunderstand。
+        # 不再传 url —— 系统是 local 的，wire 上不该出现 127.0.0.1。
         attachments_data: list[dict[str, Any]] = []
         for f in event.attachments:
-            url = f.content.decode("utf-8") if f.content else ""
-            entry: dict[str, Any] = {"url": url, "name": f.name, "mime": f.mime}
-            if f.path is not None:
-                entry["path"] = f.path
-                if f.mime.startswith("audio/"):
-                    entry["kind"] = "audio"
-                elif f.mime.startswith("image/"):
-                    entry["kind"] = "image"
-                else:
-                    entry["kind"] = "other"
+            entry: dict[str, Any] = {"path": f.path or "", "name": f.name, "mime": f.mime}
+            if f.mime.startswith("audio/"):
+                entry["kind"] = "audio"
+            elif f.mime.startswith("image/"):
+                entry["kind"] = "image"
+            else:
+                entry["kind"] = "other"
             attachments_data.append(entry)
         return _envelope(
             FrameType.USER_INPUT,

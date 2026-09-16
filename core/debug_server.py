@@ -65,6 +65,25 @@ class DebugServerConfig:
     port: int = 8768
 
 
+def _sanitize_filename(raw: str) -> str:
+    """清洗 user-supplied filename：剥路径分隔符 + 不可打印字符，保留原始语义（中文/emoji/空格）。
+
+    disk 文件名直接用 sanitize 后的原名（+ ext）—— 不加 uuid、不重命名，path 就是文件本身。
+    """
+    if not raw:
+        return ""
+    base = raw.replace("\\", "/").rsplit("/", 1)[-1]
+    if not base or base in (".", ".."):
+        return ""
+    safe = base.replace("/", "_").replace("\\", "_")
+    safe = "".join(c for c in safe if c.isprintable() and c != "\x00")
+    if not safe or safe in (".", ".."):
+        return ""
+    if len(safe) > 200:
+        safe = safe[:200]
+    return safe
+
+
 class DebugServer:
     def __init__(
         self,
@@ -140,6 +159,7 @@ class DebugServer:
         # parse headers
         content_length = 0
         content_type = ""
+        x_filename = ""
         for line in header_lines[1:]:
             if ":" not in line:
                 continue
@@ -153,6 +173,10 @@ class DebugServer:
                     content_length = 0
             elif kl == "content-type":
                 content_type = vl
+            elif kl == "x-filename":
+                # 浏览器 raw body 上传没 multipart boundary，server 解不了
+                # Content-Disposition，所以走自定义 header 带原名。
+                x_filename = vl
 
         # 读 body（如果声明了长度）
         body_bytes = b""
@@ -226,7 +250,7 @@ class DebugServer:
             return
         # ---- attachment 上传路由（需要注入 attachments_root）----
         if path == "/debug/attachments/upload" and method == "POST":
-            await self._handle_attachment_upload(body_bytes, content_type, writer, cors)
+            await self._handle_attachment_upload(body_bytes, content_type, writer, cors, x_filename)
             return
         # ---- attachment serve 路由：把上传过的文件字节喂回前端 / multimodal tool ----
         if path.startswith("/debug/attachments/") and method == "GET":
@@ -240,6 +264,7 @@ class DebugServer:
         content_type: str,
         writer: asyncio.StreamWriter,
         cors: bool,
+        x_filename: str = "",
     ) -> None:
         """POST /debug/attachments/upload — 保存文件到 attachments_root。
 
@@ -258,6 +283,7 @@ class DebugServer:
 
         import uuid
         import os
+        from urllib.parse import unquote
 
         # 从 Content-Type 提取 mime，e.g. "image/png" or "image/png; charset=..."
         mime = content_type.split(";")[0].strip() or "image/png"
@@ -283,9 +309,10 @@ class DebugServer:
             "audio/opus": ".opus",
         }
         ext = ext_map.get(mime, "")
-        filename = f"{uuid.uuid4().hex}{ext}"
+        original_name = _sanitize_filename(unquote(x_filename)) if x_filename else ""
+        # disk 文件名 = 原名 + ext（没原名时退回 `<uuid><ext>`，避免同名覆盖）。
+        filename = f"{original_name}{ext}" if original_name else f"{uuid.uuid4().hex}{ext}"
 
-        # kind：image/audio/other —— MonoDesk 据此渲染 chip、决定是否给 path 字段
         if mime.startswith("image/"):
             kind = "image"
         elif mime.startswith("audio/"):
@@ -303,19 +330,14 @@ class DebugServer:
             return
 
         _log.info("attachment saved: %s (%d bytes, mime=%s, kind=%s)", saved_path, len(body_bytes), mime, kind)
-        # URL 用绝对 HTTP（不是本地路径）—— 前端 <img> 跨 origin 加载 file:// 被 CORS 拦；
-        # MiniMax vision API 也拿不到 localhost 本地文件。HTTP URL 三方通用。
-        url = f"http://{self._cfg.host}:{self._cfg.port}/debug/attachments/{filename}"
+        # attachment 是本地文件 —— wire 上只传本地 path，LLM / 前端都拿 path 直接用。
+        display_name = original_name if original_name else filename
         payload: dict[str, Any] = {
-            "url": url,
-            "name": filename,
+            "path": str(saved_path),
+            "name": display_name,
             "mime": mime,
             "kind": kind,
         }
-        # 音频额外给本地绝对路径：MonoDesk 把它原封塞进 ws frame 的 attachment.path，
-        # server 端 skill（asr）直接读本地文件处理。避免 HTTP 回环重新拉字节。
-        if kind == "audio":
-            payload["path"] = str(saved_path)
         await _send_json(writer, 200, payload, extra_cors=cors)
 
     async def _handle_attachment_serve(
@@ -575,7 +597,7 @@ async def _write_cors_preflight(writer: asyncio.StreamWriter) -> None:
         "HTTP/1.1 204 No Content",
         "Access-Control-Allow-Origin: *",
         "Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS",
-        "Access-Control-Allow-Headers: Content-Type",
+        "Access-Control-Allow-Headers: Content-Type, X-Filename",
         "Access-Control-Max-Age: 86400",
         "Content-Length: 0",
         "Connection: close",

@@ -142,35 +142,6 @@ def _call_vision(image_url: str, prompt: str = "Describe this image in detail.")
 class MultimodalUnderstandTool:
     name = "multimodalunderstand"
 
-    def __init__(self, attachments_root: Path | None = None) -> None:
-        """`attachments_root` 是 debug server 保存 attachment 的根目录
-        （一般 = sandbox.tmp_root）。None → 不做 url→path 反推（旧行为，
-        debug server URL 仍走 requests.get）。"""
-        self._attachments_root = attachments_root
-
-    def _debug_server_path(self, url: str) -> Path | None:
-        """如果 url 是 debug server 的 attachment URL（`/debug/attachments/<fname>`），
-        反推本地绝对 path（`attachments_root/attachments/<fname>`）。否则 None。
-
-        匹配规则：path 段必须以 `/debug/attachments/` 开头 + 之后只剩一个文件名
-        段（不能含 /，防 path traversal；debug server 写入的 uuid hex + ext 都符合）。
-        文件存在才返回（不存在说明 server 进程已重启 / 文件被清，fallback 走 fetch）。
-        """
-        if self._attachments_root is None:
-            return None
-        # 跳过 query string / fragment
-        path_part = url.split("?", 1)[0].split("#", 1)[0]
-        marker = "/debug/attachments/"
-        idx = path_part.find(marker)
-        if idx < 0:
-            return None
-        fname = path_part[idx + len(marker):]
-        # 安全检查：filename 不能含 / 或 \ （防 path traversal）
-        if not fname or "/" in fname or "\\" in fname or fname.startswith("."):
-            return None
-        candidate = self._attachments_root / "attachments" / fname
-        return candidate if candidate.is_file() else None
-
     schema = {
         "type": "function",
         "function": {
@@ -188,9 +159,8 @@ class MultimodalUnderstandTool:
                         "type": "string",
                         "description": (
                             "URL or local file path of the image to analyze. "
-                            "Common case: an HTTP URL returned by the upload endpoint "
-                            "(e.g. http://127.0.0.1:8768/debug/attachments/abc123.png). "
-                            "Local file paths are also accepted for backwards compatibility."
+                            "Common case: the `path` field of an attachment in a user "
+                            "message (the file is already on disk locally)."
                         ),
                     },
                     "prompt": {
@@ -220,15 +190,8 @@ class MultimodalUnderstandTool:
 
         prompt = arguments.get("prompt") or "Describe this image in detail."
 
-        # #53 (attachment-local-path)：如果 url 是 debug server 的 attachment URL
-        # 且本地文件存在 → 直接走 local 分支（_call_vision 会 _image_b64 读 path），
-        # 避免 requests.get 同进程回环 debug server 时的 ReadTimeout。
-        # 不是 debug server URL（如 internet URL）→ 不做转换，走原 fetch 路径。
-        local_path = self._debug_server_path(url)
-        effective = str(local_path) if local_path else url
-
         try:
-            description = _call_vision(effective, prompt)
+            description = _call_vision(url, prompt)
             return ToolResult(
                 call_id=call_id,
                 status="ok",

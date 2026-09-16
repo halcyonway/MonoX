@@ -88,7 +88,7 @@ def test_to_frame_tool_end_includes_result_dict():
     assert f["data"]["result"]["call_id"] == "c1"
     assert f["data"]["result"]["status"] == "ok"
     assert f["data"]["result"]["artifacts"] == [
-        {"name": "a.txt", "mime": "text/plain", "content": "hi"}
+        {"name": "a.txt", "mime": "text/plain", "content": "hi", "kind": "other"}
     ]
 
 
