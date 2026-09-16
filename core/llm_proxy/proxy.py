@@ -120,10 +120,26 @@ class LlmProxy(LLMProxyProto):
         usage_count = 0
         try:
             async with client.stream("POST", "/chat/completions", json=payload) as resp:
-                # 非 200：把响应 body 读出来打进日志（厂家错误详情都在 body 里）
+                # 非 200：把 request payload + response body 完整 dump。
+                # LLM 400 / 401 / 429 时厂家的错只在 response body 里，但要判断是
+                # 哪段 tool_call / 哪条 message 触发，必须看到我们发的 payload；
+                # 单独看 status_code + response body 没法定位。
+                # Authorization header 脱敏（只保留前 8 字符），其它 header 全打。
                 if resp.status_code != 200:
-                    body = (await resp.aread()).decode("utf-8", errors="replace")
-                    _log.error("llm http error status=%d url=%s body=%s", resp.status_code, resp.url, body[:2000])
+                    req_body = json.dumps(payload, ensure_ascii=False)
+                    resp_body = (await resp.aread()).decode("utf-8", errors="replace")
+                    req_headers = {
+                        k: (v[:8] + "...<redacted>" if k.lower() == "authorization" else v)
+                        for k, v in client.headers.items()
+                    }
+                    _log.error(
+                        "llm http error status=%d url=%s request_payload=%s request_headers=%s response_body=%s",
+                        resp.status_code,
+                        resp.url,
+                        req_body,
+                        req_headers,
+                        resp_body[:4000],
+                    )
                     resp.raise_for_status()
                 async for line in resp.aiter_lines():
                     if not line or not line.startswith("data: "):
@@ -138,7 +154,17 @@ class LlmProxy(LLMProxyProto):
                         usage_count += 1
                     yield chunk
         except Exception:
-            _log.exception("llm stream failed: model=%s base_url=%s", model, base_url)
+            # 任何非 HTTPStatusError 的错（连接超时 / DNS / socket reset / TLS）——
+            # 把 request payload 也 dump 出来，方便判断是 network 还是 payload 问题。
+            # 单独看 traceback 没法知道是哪个 messages / tools 触发的。
+            try:
+                req_body = json.dumps(payload, ensure_ascii=False)
+                _log.exception(
+                    "llm stream failed: model=%s base_url=%s request_payload=%s",
+                    model, base_url, req_body,
+                )
+            except Exception:
+                _log.exception("llm stream failed: model=%s base_url=%s", model, base_url)
             raise
         finally:
             await client.aclose()
