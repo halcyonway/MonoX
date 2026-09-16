@@ -98,6 +98,12 @@ When the user asks you to read or summarize a local document, call `read_doc(pat
 
 Supported formats: `.pdf` (via pypdf), `.txt` / `.md` / `.markdown` (utf-8), `.csv` (parsed into a markdown table), `.json` (re-serialized with indent=2).
 
+**`path` must be a local file path. URLs are NOT accepted** — if you have an HTTP URL (e.g. an `attachment url="..."` in a user message, or a remote `https://...` document), download it first with `bash` + `curl` to a local file, then call `read_doc(path=<local_path>)`. Example:
+```sh
+curl -sSL -o "$WORKSPACE/file.pdf" 'http://127.0.0.1:8768/debug/attachments/abc123'
+read_doc(path="$WORKSPACE/file.pdf")
+```
+
 For other formats (`.docx` / `.pptx` / `.xlsx` / `.epub` / images / audio) `read_doc` will return an explicit error — do NOT retry. Instead either:
 - Use `bash` to convert (e.g. `libreoffice --headless --convert-to pdf <file>`, `pandoc -o out.md in.docx`)
 - Or tell the user the format is not supported

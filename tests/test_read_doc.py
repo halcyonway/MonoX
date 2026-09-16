@@ -144,6 +144,43 @@ async def test_empty_path_argument(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_http_url_rejected_with_actionable_error(tmp_path):
+    """LLM 经常把 attachment url 直接喂进 path 字段。tool 必须显式拒绝并
+    告诉 agent 下一步（先 curl 下来再 read_doc），不能静默拼成
+    workspace/http:/127.0.0.1/... 然后报 file not found。"""
+    tool = _build_tool(tmp_path)
+    r = await _run(
+        tool,
+        "http://127.0.0.1:8768/debug/attachments/931aefb3faf04134bcf4b70d5d682f37",
+    )
+    assert r.status == "error"
+    assert "looks like a URL" in r.stderr
+    # 必须告诉 agent 下一步怎么办：curl + 重新调 read_doc
+    assert "curl" in r.stderr
+    assert "read_doc" in r.stderr
+    # 关键：不能在 stderr 里出现 workspace 拼接后的假路径
+    assert "workspace/http" not in r.stderr
+
+
+@pytest.mark.asyncio
+async def test_https_url_rejected(tmp_path):
+    tool = _build_tool(tmp_path)
+    r = await _run(tool, "https://example.com/report.pdf")
+    assert r.status == "error"
+    assert "looks like a URL" in r.stderr
+
+
+@pytest.mark.asyncio
+async def test_file_url_rejected(tmp_path):
+    tool = _build_tool(tmp_path)
+    r = await _run(tool, "file:///etc/passwd")
+    assert r.status == "error"
+    assert "looks like a URL" in r.stderr
+    # 安全提示：file:// 不能直接当 path 用 —— 即便存在也拒绝
+    assert "local" in r.stderr.lower()
+
+
+@pytest.mark.asyncio
 async def test_missing_file(tmp_path):
     tool = _build_tool(tmp_path)
     r = await _run(tool, "ghost.pdf")

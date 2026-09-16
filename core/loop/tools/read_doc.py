@@ -146,9 +146,13 @@ class ReadDocTool:
                     "path": {
                         "type": "string",
                         "description": (
-                            "Absolute or sandbox-relative path to the document. "
+                            "Absolute or sandbox-relative path to a LOCAL file on disk. "
                             "Relative paths resolve against the session workspace "
                             "(same as `bash` cwd). "
+                            "DO NOT pass URLs (http://, https://, file://) — "
+                            "`read_doc` does not fetch remote resources. "
+                            "To read a URL: first `curl` it down with `bash`, "
+                            "then call `read_doc` on the local path. "
                             "Examples: '/path/to/report.pdf', './data/q3.csv', 'notes.md'."
                         ),
                     },
@@ -170,6 +174,32 @@ class ReadDocTool:
                 status="error",
                 stdout="",
                 stderr="path is required",
+                exit_code=1,
+            )
+
+        # 防御：URL 直接当 path 喂进来 = 常见 LLM 错误。
+        # 之前会被静默拼到 workspace 后面（workspace/http:/127.0.0.1:...），
+        # 再 stat() → file not found，stderr 信息没用。
+        # 这里显式拦下，告诉 agent 下一步：先 curl 下来再传 path。
+        lowered = path_arg.lower()
+        if (
+            lowered.startswith("http://")
+            or lowered.startswith("https://")
+            or lowered.startswith("file://")
+        ):
+            return ToolResult(
+                call_id=call_id,
+                status="error",
+                stdout="",
+                stderr=(
+                    f"path looks like a URL: {path_arg}. "
+                    f"`read_doc` only reads local files. "
+                    f"Download first with `bash`, e.g.:\n"
+                    f"  curl -sSL -o $WORKSPACE/file.pdf '{path_arg}'\n"
+                    f"  read_doc(path=\"$WORKSPACE/file.pdf\")\n"
+                    f"For debug-server attachments (http://127.0.0.1:8768/debug/attachments/<id>), "
+                    f"the file is already on the server — use `bash` with `curl` to fetch it locally."
+                ),
                 exit_code=1,
             )
 
