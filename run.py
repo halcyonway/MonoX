@@ -40,6 +40,7 @@ from core.llm_proxy import LlmProxy
 from core.loop import (
     BashTool,
     MultimodalUnderstandTool,
+    ReadDocTool,
     ReadToolResultBudgetTool,
     SkillLoadTool,
     ToolRegistry,
@@ -90,6 +91,18 @@ the subagent's final message IS the deliverable. A subagent that ends its
 turn via `wait_io` is marked completed with a partial result.
 
 You can receive images as <attachment url="..."> elements in user events. To understand an image, call multimodalunderstand(attachment_url="...") with the file path or URL shown in the attachment's `url` attribute.
+
+## Reading documents (PDF, text, csv, json)
+
+When the user asks you to read or summarize a local document, call `read_doc(path=...)` — it auto-detects format from the file suffix and returns the content as markdown.
+
+Supported formats: `.pdf` (via pypdf), `.txt` / `.md` / `.markdown` (utf-8), `.csv` (parsed into a markdown table), `.json` (re-serialized with indent=2).
+
+For other formats (`.docx` / `.pptx` / `.xlsx` / `.epub` / images / audio) `read_doc` will return an explicit error — do NOT retry. Instead either:
+- Use `bash` to convert (e.g. `libreoffice --headless --convert-to pdf <file>`, `pandoc -o out.md in.docx`)
+- Or tell the user the format is not supported
+
+For scanned PDFs (no extractable text), `read_doc` returns a hint suggesting `multimodalunderstand` per page or OCR via `bash` — do not retry `read_doc` on the same file.
 
 ## Image preview — show, don't just describe
 
@@ -468,6 +481,7 @@ async def run(cfg_path: str, args: argparse.Namespace) -> None:
             BashTool(runner, paths["workspace"]),
             SkillLoadTool(skill_service),
             MultimodalUnderstandTool(),
+            ReadDocTool(paths["workspace"]),
             WaitIoTool(),
             budget_tool,
         ]
