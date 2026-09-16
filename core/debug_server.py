@@ -351,11 +351,13 @@ class DebugServer:
             return
         # 从扩展名推 mime（写文件时也用同样映射，对称）
         ext_map = {
+            # image
             ".png": "image/png",
             ".jpg": "image/jpeg",
             ".jpeg": "image/jpeg",
             ".gif": "image/gif",
             ".webp": "image/webp",
+            # audio
             ".m4a": "audio/mp4",
             ".mp3": "audio/mpeg",
             ".wav": "audio/wav",
@@ -363,6 +365,15 @@ class DebugServer:
             ".aac": "audio/aac",
             ".flac": "audio/flac",
             ".opus": "audio/opus",
+            # doc（新增，跟 ALLOWED_UPLOAD_MIME 白名单 1:1 对齐 —— 之前漏 doc
+            # 导致 PDF 等发出去后 server 返回 application/octet-stream，浏览器
+            # <img src=...pdf> 拿不到正确 mime 渲染第一页）
+            ".pdf": "application/pdf",
+            ".md": "text/markdown",
+            ".markdown": "text/markdown",
+            ".csv": "text/csv",
+            ".json": "application/json",
+            ".txt": "text/plain",
         }
         mime = ext_map.get(file_path.suffix.lower(), "application/octet-stream")
         await _send_bytes(writer, 200, mime, body, extra_cors=cors)
