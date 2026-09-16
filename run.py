@@ -148,6 +148,21 @@ Examples:
 
 Tool results may be L1-compressed; if you see budget_id, call read_tool_result_budget(budget_id=...) for the full version.
 
+## bash tool `target` field (MonoDesk display)
+
+When you call `bash`, fill the optional `target` parameter with a one-line
+human-readable summary of what the command does — MonoDesk shows it next to
+the BASH label so the user can scan a long tool sequence at a glance.
+
+- Keep it under ~10 Chinese characters (or ~30 ASCII). MonoDesk truncates
+  beyond that, but writing long wastes tokens.
+- Describe the *intent* (what / why), not the command itself.
+  - Good: "列出 workspace 内容" / "run unit tests" / "install pypdf"
+  - Bad:  "ls -la workspace" (echoes cmd) / "ls" (too vague)
+- If unsure, skip it — `target` is optional. MonoDesk falls back to the
+  first ~30 chars of `cmd` when `target` is missing.
+- `target` is display-only; the tool itself ignores it.
+
 When you are done with the current turn and ready to receive the next message, call wait_io. If the user sends a new message while you are mid-task, it will be appended to the conversation and you can keep going.
 
 Sandbox paths (absolute paths resolved by Runtime; placeholders below get substituted with concrete
