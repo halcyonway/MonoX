@@ -9,12 +9,21 @@ https://platform.minimaxi.com/docs/api-reference/text-openai-api
 Image is sent as:
 - URL: `image_url` with `url` field → for HTTP URLs
 - base64: `image_url` with `url: f"data:{mime};base64,{b64}"` → for local files
+
+# #53 (attachment-local-path): debug server upload endpoint 返回的 URL
+# `http://127.0.0.1:8768/debug/attachments/xxx.png` 跟我们自己 process 同 host
+# 同 port，但 Tauri WebView / 某些 proxy 场景下从 process 内 requests.get 这个 URL
+# 会 ReadTimeout（事件循环里 fetch 自己起的 server 容易撞 event loop / 端口转发）。
+# 解决：把 attachments_root 注入 tool，遇到 debug server URL 时反推本地 path，
+# 直接 open() 读 bytes，不再走 fetch。audio / pdf 走类似逻辑（debug_server 已经
+# 对 audio 返回 path 字段，pdf/其它还在 url-only 阶段——先解决 image 阻塞点）。
 """
 from __future__ import annotations
 
 import base64
 import os
 import re
+from pathlib import Path
 from typing import Any
 
 import requests
@@ -132,6 +141,36 @@ def _call_vision(image_url: str, prompt: str = "Describe this image in detail.")
 
 class MultimodalUnderstandTool:
     name = "multimodalunderstand"
+
+    def __init__(self, attachments_root: Path | None = None) -> None:
+        """`attachments_root` 是 debug server 保存 attachment 的根目录
+        （一般 = sandbox.tmp_root）。None → 不做 url→path 反推（旧行为，
+        debug server URL 仍走 requests.get）。"""
+        self._attachments_root = attachments_root
+
+    def _debug_server_path(self, url: str) -> Path | None:
+        """如果 url 是 debug server 的 attachment URL（`/debug/attachments/<fname>`），
+        反推本地绝对 path（`attachments_root/attachments/<fname>`）。否则 None。
+
+        匹配规则：path 段必须以 `/debug/attachments/` 开头 + 之后只剩一个文件名
+        段（不能含 /，防 path traversal；debug server 写入的 uuid hex + ext 都符合）。
+        文件存在才返回（不存在说明 server 进程已重启 / 文件被清，fallback 走 fetch）。
+        """
+        if self._attachments_root is None:
+            return None
+        # 跳过 query string / fragment
+        path_part = url.split("?", 1)[0].split("#", 1)[0]
+        marker = "/debug/attachments/"
+        idx = path_part.find(marker)
+        if idx < 0:
+            return None
+        fname = path_part[idx + len(marker):]
+        # 安全检查：filename 不能含 / 或 \ （防 path traversal）
+        if not fname or "/" in fname or "\\" in fname or fname.startswith("."):
+            return None
+        candidate = self._attachments_root / "attachments" / fname
+        return candidate if candidate.is_file() else None
+
     schema = {
         "type": "function",
         "function": {
@@ -181,8 +220,15 @@ class MultimodalUnderstandTool:
 
         prompt = arguments.get("prompt") or "Describe this image in detail."
 
+        # #53 (attachment-local-path)：如果 url 是 debug server 的 attachment URL
+        # 且本地文件存在 → 直接走 local 分支（_call_vision 会 _image_b64 读 path），
+        # 避免 requests.get 同进程回环 debug server 时的 ReadTimeout。
+        # 不是 debug server URL（如 internet URL）→ 不做转换，走原 fetch 路径。
+        local_path = self._debug_server_path(url)
+        effective = str(local_path) if local_path else url
+
         try:
-            description = _call_vision(url, prompt)
+            description = _call_vision(effective, prompt)
             return ToolResult(
                 call_id=call_id,
                 status="ok",

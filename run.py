@@ -467,7 +467,9 @@ async def run(cfg_path: str, args: argparse.Namespace) -> None:
         [
             BashTool(runner, paths["workspace"]),
             SkillLoadTool(skill_service),
-            MultimodalUnderstandTool(),
+            # #53: 注入 attachments_root，让 multimodalunderstand 收到 debug server URL
+            # 时能反推本地 path，避免 requests.get 回环同进程 server 的 ReadTimeout。
+            MultimodalUnderstandTool(attachments_root=Path(cfg.sandbox.tmp_root)),
             WaitIoTool(),
             budget_tool,
         ]
