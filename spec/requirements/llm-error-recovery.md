@@ -38,8 +38,6 @@ except Exception as exc:
    LLM 自身错也是同理（让它少调一次、改 prompt、解释给用户）。abort 直接剥夺
    LLM 决策机会。
 
-用户原话：「tool报错不应该让agentloop挂掉，请你定位问题，最多提示一个tool失败就行了啊，然后交给agent自己处理。」
-
 ## 目标
 
 1. **LLM 网络错自动 retry**：HTTP 4xx/5xx、连接超时、connection reset → 自动重试 3 次（指数退避 1s/2s/4s），不给用户看中间错

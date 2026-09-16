@@ -1,8 +1,6 @@
 # bash-target: bash tool 加 target 字段（前端展示用）
 
 > 2026-09 起草。
-> **用户原话**：「bash 工具加一个参数，target，10 字以内，只用于在 monodesk
-> 这里展示。不然一眼看过去全是 bash，看不出在干啥，agent 自己说 target 谁狠么。」
 >
 > 闭环两仓库：MonoX 改 tool schema + system prompt；MonoDesk 改 ToolBlock 渲染。
 > 协议 / event 层 **不动**（`ToolPending.args` 本来就全量 wire 过去，前端一直能读）。
@@ -61,7 +59,7 @@ class BashTool:
 **关键点**：
 - `target` 是 **optional**，agent 不写也不报错
 - `BashTool.execute` **完全不读** `target`——bash 真执行的还是 `cmd`
-- 长度**不写死**（不强制 maxLength）：用户原话「LLM 自己控制，如果真的超出了，我们 monodesk 层面做截断」
+- 长度**不写死**（不强制 maxLength）：LLM 自控长度，MonoDesk 层面做截断
 - wire 协议不动：`ToolPending.args` 本来就是 dict，target 跟着其他 args 一起进前端
 - LLM context 影响：target 进 tool_calls.arguments → 进下一轮 LLM context。~10 中文字 = ~30 token，可控
 
@@ -203,4 +201,4 @@ npm run typecheck  # 不破（type 不变）
   拿完整 args，跟现在一样
 - **不**在 wire 层加独立字段（target 走 OpenAI 标准 tool_calls，自然在 args 里）
 - **不**做 i18n 字符串 / 主题（target 就是 LLM 写的原文，UTF-8 透传）
-- **不**给 target 加 maxLength schema constraint（用户原话明确「LLM 自己控制」）
+- **不**给 target 加 maxLength schema constraint（LLM 自控长度）

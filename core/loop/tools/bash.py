@@ -2,7 +2,7 @@
 
 `target` 参数（spec/requirements/bash-target.md）：
 
-- optional，LLM 自己控制长度（用户原话）
+- optional，LLM 自控长度
 - BashTool.execute **完全不读** —— 纯前端展示用，进 args dict 自然 wire 过去
 - 不进 bash 真执行的 command 字符串，LLM context 里它跟 cmd 平级
 """

@@ -1,8 +1,7 @@
 """Event → XML 序列化。
 
-设计原则（用户原话）：
-> 「一切外部信息都是event，不止user input。xml原始格式送到context，
->   至少包括时间、channel之类的。」
+设计原则：所有外部信息（user_input / tool_result / command / interrupt）
+统一用 XML 格式送到 LLM context，至少含 timestamp + channel 等元数据。
 
 进 LLM context 的 messages 里，所有「外部信息」（user_input / tool_result /
 command / interrupt）都用 XML 格式承载，至少含：
