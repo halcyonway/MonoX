@@ -12,6 +12,16 @@ from core.loop.engine import LoopEngine
 from core.loop.tool_registry import ToolRegistry
 from core.memory import FsMemoryStore
 from core.observability import JsonlTraceStore, TraceCollector
+from core.observability.otel_attrs import (
+    ATTR_GENAI_REQUEST_MESSAGES,
+    ATTR_GENAI_REQUEST_MODEL,
+    ATTR_GENAI_RESPONSE_FINISH_REASONS,
+    ATTR_GENAI_RESPONSE_TEXT,
+    ATTR_GENAI_USAGE_CACHED_TOKENS,
+    ATTR_GENAI_USAGE_INPUT_TOKENS,
+    ATTR_GENAI_USAGE_OUTPUT_TOKENS,
+)
+from core.observability.types import SpanKind
 from core.protocol import InboundEvent, LlmChunk, LLMProxy
 
 # memory 功能后 assemble_messages 的 memory_section 需要 path_vars（run.py 装配时提供）
@@ -158,16 +168,19 @@ async def test_engine_records_llm_span(tmp_path: Path):
     assert len(full.turns) >= 1
 
     reasoning = [
-        s for t in full.turns for s in t.spans if s.kind.value == "reasoning"
+        s for t in full.turns for s in t.spans if s.kind == SpanKind.REASONING
     ]
     assert len(reasoning) >= 1
     sp = reasoning[0]
-    assert sp.attributes["model"] == "m1"
-    assert sp.attributes["response_text"] == "hello back"
-    assert sp.attributes["usage"]["completion_tokens"] == 2
-    assert sp.attributes["finish_reason"] == "stop"
+    assert sp.attributes[ATTR_GENAI_REQUEST_MODEL] == "m1"
+    assert sp.attributes[ATTR_GENAI_RESPONSE_TEXT] == "hello back"
+    # OTel 把 usage 拆 3 个顶层 attr
+    assert sp.attributes[ATTR_GENAI_USAGE_OUTPUT_TOKENS] == 2
+    assert sp.attributes[ATTR_GENAI_USAGE_INPUT_TOKENS] == 5
+    assert ATTR_GENAI_USAGE_CACHED_TOKENS in sp.attributes  # 字段存在（None 也算）
+    assert sp.attributes[ATTR_GENAI_RESPONSE_FINISH_REASONS] == "stop"
     # messages 必须包含 system + user（user 现在是 XML event 包装）
-    msgs = sp.attributes["messages"]
+    msgs = sp.attributes[ATTR_GENAI_REQUEST_MESSAGES]
     assert any(m.get("role") == "system" for m in msgs)
     assert any(
         m.get("role") == "user"
@@ -177,6 +190,9 @@ async def test_engine_records_llm_span(tmp_path: Path):
         and "hi" in m["content"]
         for m in msgs
     )
+    # 新增：tool_schemas 应该也被捕获（OTel gen_ai.request.tool_specs）
+    assert isinstance(sp.attributes.get("gen_ai.request.tool_specs"), list)
+    # 新增：TTFT 字段应该存在（mock 不填 first_chunk_at_ms，但字段是可选的）
 
     # 清理
     await _shutdown_engine(task)

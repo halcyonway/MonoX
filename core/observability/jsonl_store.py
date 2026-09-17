@@ -36,6 +36,7 @@ def _to_summary(run: Run) -> RunSummary:
         end_ts=run.end_ts,
         status=run.status,
         turn_count=len(run.turns),
+        schema_version=run.schema_version,
     )
 
 
@@ -52,8 +53,23 @@ def _parse_line(line: str) -> Run | None:
         return None
 
 
+def _line_schema_version(line: str) -> int | None:
+    """peek 单行 schema_version；缺字段视为 v1。"""
+    try:
+        raw = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(raw, dict):
+        return None
+    return int(raw.get("schema_version", 1))
+
+
 def _read_all_runs(path: Path) -> dict[str, Run]:
-    """全量读文件，run_id → Run（后者覆盖前者）。"""
+    """全量读文件，run_id → Run（后者覆盖前者）。
+
+    v1 行（schema_version < 2）跳过并 warn——启动时全 v1 文件已归档，混合
+    文件里残留的 v1 行也按"不读"处理。
+    """
     out: dict[str, Run] = {}
     if not path.exists():
         return out
@@ -66,6 +82,10 @@ def _read_all_runs(path: Path) -> dict[str, Run]:
         line = line.strip()
         if not line:
             continue
+        sv = _line_schema_version(line)
+        if sv is not None and sv < 2:
+            _log.debug("skip legacy v1 trace line in %s", path)
+            continue
         run = _parse_line(line)
         if run is None:
             continue
@@ -77,6 +97,7 @@ def _read_tail_runs(path: Path, max_bytes: int) -> dict[str, Run]:
     """读文件末尾最多 max_bytes，按 run_id 去重（后者覆盖前者）。
 
     大文件 list 性能优化：只关心最近 N 条不需要扫整个文件。
+    v1 行跳过（见 _read_all_runs 注释）。
     """
     out: dict[str, Run] = {}
     if not path.exists():
@@ -97,6 +118,10 @@ def _read_tail_runs(path: Path, max_bytes: int) -> dict[str, Run]:
     for line in data.splitlines():
         line = line.strip()
         if not line:
+            continue
+        sv = _line_schema_version(line)
+        if sv is not None and sv < 2:
+            _log.debug("skip legacy v1 trace line in tail of %s", path)
             continue
         run = _parse_line(line)
         if run is None:
@@ -119,6 +144,52 @@ class JsonlTraceStore:
         self._path = Path(self.path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._write_lock = asyncio.Lock()
+        # v1 归档：启动时扫一次，全是 v1 行就把整个文件重命名成 .v1.jsonl
+        self._archive_v1_if_needed()
+
+    def _archive_v1_if_needed(self) -> None:
+        path = self._path
+        if not path.exists():
+            return
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            _log.warning("trace file read for v1-archive failed: %s", exc)
+            return
+        lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+        if not lines:
+            return
+        # 没有任何 v2 行 → 整体归档；只要含一条 v2 就不归档（混合文件按可读处理）
+        has_v2 = False
+        for ln in lines:
+            sv = _line_schema_version(ln)
+            if sv is None:
+                continue
+            if sv >= 2:
+                has_v2 = True
+                break
+        if has_v2:
+            return
+        # 全 v1：归档
+        archived = path.with_suffix(path.suffix + ".v1.jsonl")
+        if archived.exists():
+            # 已存在归档：覆盖还是跳过？选"追加"-不，文件级操作用 replace + 序号
+            # 简单起见：给归档再加一个 .1 后缀避免覆盖
+            i = 1
+            while True:
+                cand = path.with_suffix(path.suffix + f".v1.{i}.jsonl")
+                if not cand.exists():
+                    archived = cand
+                    break
+                i += 1
+        try:
+            path.rename(archived)
+            _log.info(
+                "archived legacy v1 trace file %s -> %s (%d lines, v2 reader not backcompat)",
+                path, archived, len(lines),
+            )
+        except OSError as exc:
+            _log.warning("v1 archive rename failed: %s", exc)
 
     # ---- write ----
 

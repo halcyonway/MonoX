@@ -1,15 +1,17 @@
-"""Phase 2 trace 集成测试：act (tool dispatch) + compress (L1/L2) span 真的接入。
+"""Trace 集成测试：tool/act + compress (L1/L2) span 真的接入。
 
-之前 Phase 1 只验证了 reasoning span。Phase 2 在 engine 里加了：
-- record_act_span（每个 tool_call 完成时记一条）
-- record_compress_span（L1 在 tool result 被截断时记；L2 在 _react maybe_summarize 折叠时记）
+v2 模型：
+- 每个 tool_call 触发 `record_tool_span`（kind=tool，OTel tool.* 字段）
+- 同 turn 的所有 tool_call 共享一个 ACT 容器 span（kind=act，记录 tool_calls_count）
+- L1 截断 → record_compress_span(level="L1")；L2 折叠 → record_compress_span(level="L2")
+- reasoning span 走 OTel 字段（gen_ai.response.reasoning / gen_ai.usage.cached_tokens 等）
 
-这里跑完整 loop（mock LLM 一次 tool_call → real tool → next turn 收 final），
-断言 collector 看到正确的 act / compress span。
+OTel 规定 tool.call.arguments / tool.result 是 string；MonoX 存 JSON 字符串。
 """
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -21,6 +23,19 @@ from core.loop.tool_registry import ToolRegistry
 from core.loop.tools.read_tr_budget import ReadToolResultBudgetTool
 from core.memory import FsMemoryStore
 from core.observability import JsonlTraceStore, TraceCollector
+from core.observability.otel_attrs import (
+    ATTR_GENAI_CLIENT_OPERATION_DURATION,
+    ATTR_GENAI_RESPONSE_REASONING,
+    ATTR_GENAI_USAGE_CACHED_TOKENS,
+    ATTR_LOOP_COMPRESS_BUDGETS,
+    ATTR_LOOP_COMPRESS_FOLDED,
+    ATTR_LOOP_COMPRESS_LEVEL,
+    ATTR_LOOP_COMPRESS_SUMMARY,
+    ATTR_TOOL_CALL_ARGUMENTS,
+    ATTR_TOOL_NAME,
+    ATTR_TOOL_RESULT,
+)
+from core.observability.types import SpanKind
 from core.protocol import InboundEvent, LlmChunk, LLMProxy, ToolResult
 
 # memory 功能后 assemble_messages 的 memory_section 需要 path_vars（run.py 装配时提供）
@@ -152,11 +167,11 @@ async def _shutdown(task: asyncio.Task) -> None:
 
 
 # ----------------------------------------------------------------------
-# act span
+# tool / act span
 # ----------------------------------------------------------------------
 
-async def test_engine_records_act_span(tmp_path: Path):
-    """bash 工具被调一次 → collector 收到一条 act span (tool_name=bash, args, result)。"""
+async def test_engine_records_tool_span(tmp_path: Path):
+    """bash 工具被调一次 → collector 收到 ACT 容器 + TOOL span（OTel tool.* 字段）。"""
     store = JsonlTraceStore(tmp_path / "traces.jsonl")
     collector = TraceCollector(store, "default")
     llm = _MockLLMTool()
@@ -171,21 +186,26 @@ async def test_engine_records_act_span(tmp_path: Path):
 
     full = await store.get_run("default", (await store.list_runs("default"))[0].run_id)
     all_spans = [s for t in full.turns for s in t.spans]
-    acts = [s for s in all_spans if s.kind.value == "act"]
-    assert len(acts) == 1, all_spans
-    a = acts[0]
-    assert a.attributes["tool_name"] == "bash"
-    assert a.attributes["args"] == {"cmd": "echo hi"}
-    assert a.attributes["result"]["stdout"] == "hi\n"
-    assert a.attributes["result"]["exit_code"] == 0
-    # status 是 Span 的字段，不在 attributes 里
-    assert a.status == "ok"
-    assert a.attributes["latency_ms"] >= 0
+    tools = [s for s in all_spans if s.kind == SpanKind.TOOL]
+    acts = [s for s in all_spans if s.kind == SpanKind.ACT]
+    assert len(tools) == 1, all_spans
+    assert len(acts) == 1
+    t = tools[0]
+    assert t.attributes[ATTR_TOOL_NAME] == "bash"
+    # OTel 规定 args / result 是 string；MonoX 存 JSON 字符串
+    assert json.loads(t.attributes[ATTR_TOOL_CALL_ARGUMENTS]) == {"cmd": "echo hi"}
+    parsed_result = json.loads(t.attributes[ATTR_TOOL_RESULT])
+    assert parsed_result["stdout"] == "hi\n"
+    assert parsed_result["exit_code"] == 0
+    assert t.status == "ok"
+    assert t.attributes[ATTR_GENAI_CLIENT_OPERATION_DURATION] >= 0
+    # tool 挂在 act 容器下
+    assert t.parent_id == acts[0].span_id
     await _shutdown(task)
 
 
-async def test_engine_records_act_span_for_unknown_tool(tmp_path: Path):
-    """agent 调不存在的 tool → 第一条 act span status=error（之后 llm 再 final 收尾）。"""
+async def test_engine_records_tool_span_for_unknown_tool(tmp_path: Path):
+    """agent 调不存在的 tool → TOOL span status=error（之后 llm 再 final 收尾）。"""
     store = JsonlTraceStore(tmp_path / "traces.jsonl")
     collector = TraceCollector(store, "default")
 
@@ -226,16 +246,17 @@ async def test_engine_records_act_span_for_unknown_tool(tmp_path: Path):
     await asyncio.sleep(0.05)
 
     full = await store.get_run("default", (await store.list_runs("default"))[0].run_id)
-    acts = [s for t in full.turns for s in t.spans if s.kind.value == "act"]
-    unknown_acts = [a for a in acts if a.attributes["tool_name"] == "no_such_tool"]
-    assert len(unknown_acts) == 1
-    assert unknown_acts[0].status == "error"
-    assert "unknown tool" in unknown_acts[0].attributes["result"]["stderr"]
+    all_spans = [s for t in full.turns for s in t.spans]
+    unknown_tools = [t for t in all_spans if t.kind == SpanKind.TOOL and t.attributes.get(ATTR_TOOL_NAME) == "no_such_tool"]
+    assert len(unknown_tools) == 1
+    assert unknown_tools[0].status == "error"
+    parsed = json.loads(unknown_tools[0].attributes[ATTR_TOOL_RESULT])
+    assert "unknown tool" in parsed["stderr"]
     await _shutdown(task)
 
 
-async def test_engine_records_act_span_for_wait_io(tmp_path: Path):
-    """wait_io 也记一条 act span（status=ok，loop paused 是合法状态）。"""
+async def test_engine_records_tool_span_for_wait_io(tmp_path: Path):
+    """wait_io 也记一条 TOOL span（status=ok，loop paused 是合法状态）。"""
     from core.loop import WaitIoTool
 
     store = JsonlTraceStore(tmp_path / "traces.jsonl")
@@ -286,10 +307,11 @@ async def test_engine_records_act_span_for_wait_io(tmp_path: Path):
     await asyncio.sleep(0.05)
 
     full = await store.get_run("default", (await store.list_runs("default"))[0].run_id)
-    acts = [s for t in full.turns for s in t.spans if s.kind.value == "act"]
-    assert len(acts) == 1
-    assert acts[0].attributes["tool_name"] == "wait_io"
-    assert acts[0].status == "ok"
+    all_spans = [s for t in full.turns for s in t.spans]
+    tools = [t for t in all_spans if t.kind == SpanKind.TOOL]
+    assert len(tools) == 1
+    assert tools[0].attributes[ATTR_TOOL_NAME] == "wait_io"
+    assert tools[0].status == "ok"
     await _shutdown(task)
 
 
@@ -298,7 +320,7 @@ async def test_engine_records_act_span_for_wait_io(tmp_path: Path):
 # ----------------------------------------------------------------------
 
 async def test_engine_records_l1_compress_span_on_long_tool_output(tmp_path: Path):
-    """bash 输出超 4000 字符 → L1 截断 → 同时记 act span + compress:L1 span。"""
+    """bash 输出超 4000 字符 → L1 截断 → 同时记 tool span + compress:L1 span。"""
     store = JsonlTraceStore(tmp_path / "traces.jsonl")
     collector = TraceCollector(store, "default")
     llm = _MockLLMTool()
@@ -314,17 +336,18 @@ async def test_engine_records_l1_compress_span_on_long_tool_output(tmp_path: Pat
 
     full = await store.get_run("default", (await store.list_runs("default"))[0].run_id)
     all_spans = [s for t in full.turns for s in t.spans]
-    by_kind = {s.kind.value: s for s in all_spans}
-    assert "act" in by_kind
-    assert "compress" in by_kind
-    comp = by_kind["compress"]
-    assert comp.attributes["level"] == "L1"
-    assert comp.attributes["folded_count"] == 1
-    assert isinstance(comp.attributes["budget_ids"], list)
-    assert len(comp.attributes["budget_ids"]) == 1
-    assert comp.attributes["budget_ids"][0]  # 非空 hex id
-    # act span 的 result 应该已经 truncated=True
-    assert by_kind["act"].attributes["result"]["truncated"] is True
+    by_kind = {s.kind: s for s in all_spans}
+    assert SpanKind.TOOL in by_kind
+    assert SpanKind.COMPRESS in by_kind
+    comp = by_kind[SpanKind.COMPRESS]
+    assert comp.attributes[ATTR_LOOP_COMPRESS_LEVEL] == "L1"
+    assert comp.attributes[ATTR_LOOP_COMPRESS_FOLDED] == 1
+    assert isinstance(comp.attributes[ATTR_LOOP_COMPRESS_BUDGETS], list)
+    assert len(comp.attributes[ATTR_LOOP_COMPRESS_BUDGETS]) == 1
+    assert comp.attributes[ATTR_LOOP_COMPRESS_BUDGETS][0]  # 非空 hex id
+    # tool span 的 result 应该已经 truncated=True
+    tool_result = json.loads(by_kind[SpanKind.TOOL].attributes[ATTR_TOOL_RESULT])
+    assert tool_result["truncated"] is True
     await _shutdown(task)
 
 
@@ -344,7 +367,7 @@ async def test_engine_no_compress_span_when_tool_output_short(tmp_path: Path):
 
     full = await store.get_run("default", (await store.list_runs("default"))[0].run_id)
     all_spans = [s for t in full.turns for s in t.spans]
-    compresses = [s for s in all_spans if s.kind.value == "compress"]
+    compresses = [s for s in all_spans if s.kind == SpanKind.COMPRESS]
     assert compresses == []
     await _shutdown(task)
 
@@ -413,10 +436,10 @@ async def test_engine_records_l2_compress_span_on_long_history(tmp_path: Path):
 
     full = await store.get_run("default", (await store.list_runs("default"))[0].run_id)
     all_spans = [s for t in full.turns for s in t.spans]
-    l2 = [s for s in all_spans if s.kind.value == "compress" and s.attributes.get("level") == "L2"]
-    assert len(l2) == 1, [s.kind.value + "/" + str(s.attributes.get("level")) for s in all_spans]
-    assert l2[0].attributes["folded_count"] > 0
-    assert "folded history summary" in l2[0].attributes["summary"]
+    l2 = [s for s in all_spans if s.kind == SpanKind.COMPRESS and s.attributes.get(ATTR_LOOP_COMPRESS_LEVEL) == "L2"]
+    assert len(l2) == 1, [str(s.kind) + "/" + str(s.attributes.get(ATTR_LOOP_COMPRESS_LEVEL)) for s in all_spans]
+    assert l2[0].attributes[ATTR_LOOP_COMPRESS_FOLDED] > 0
+    assert "folded history summary" in l2[0].attributes[ATTR_LOOP_COMPRESS_SUMMARY]
     # 验证 LLM 确实被调用了 2 次（一次 summary，一次 chat）
     assert llm.n == 2
     await _shutdown(task)
@@ -427,7 +450,7 @@ async def test_engine_records_l2_compress_span_on_long_history(tmp_path: Path):
 # ----------------------------------------------------------------------
 
 async def test_reasoning_span_records_reasoning_content(tmp_path: Path):
-    """LLM stream yield reasoning_content_delta → record_llm_span 拼完整内容。"""
+    """LLM stream yield reasoning_content_delta → reasoning span 拼完整内容（OTel 字段）。"""
 
     class _ReasoningLLM(LLMProxy):
         async def stream(self, messages, tools=None, options=None) -> AsyncIterator[LlmChunk]:
@@ -455,20 +478,20 @@ async def test_reasoning_span_records_reasoning_content(tmp_path: Path):
     await asyncio.sleep(0.05)
 
     full = await store.get_run("default", (await store.list_runs("default"))[0].run_id)
-    reasoning = [s for t in full.turns for s in t.spans if s.kind.value == "reasoning"]
+    reasoning = [s for t in full.turns for s in t.spans if s.kind == SpanKind.REASONING]
     assert len(reasoning) == 1
     r = reasoning[0]
-    assert r.attributes["reasoning_content"] == "让我想想... 该用 grep"
-    assert r.attributes["usage"]["cached_tokens"] == 8  # 透传
+    assert r.attributes[ATTR_GENAI_RESPONSE_REASONING] == "让我想想... 该用 grep"
+    assert r.attributes[ATTR_GENAI_USAGE_CACHED_TOKENS] == 8
     await _shutdown(task)
 
 
 # ----------------------------------------------------------------------
-# #4 tool.execute 异常路径：自定义 tool 直接 raise 也保证记 act span
+# #4 tool.execute 异常路径：自定义 tool 直接 raise 也保证记 tool span
 # ----------------------------------------------------------------------
 
-async def test_engine_records_act_span_when_tool_raises(tmp_path: Path):
-    """tool.execute 直接 raise（非返回 status=error 的 ToolResult）也保证记一条 act span。"""
+async def test_engine_records_tool_span_when_tool_raises(tmp_path: Path):
+    """tool.execute 直接 raise（非返回 status=error 的 ToolResult）也保证记一条 TOOL span。"""
 
     class _BoomTool:
         name = "boom"
@@ -518,21 +541,30 @@ async def test_engine_records_act_span_when_tool_raises(tmp_path: Path):
     await asyncio.sleep(0.05)
 
     full = await store.get_run("default", (await store.list_runs("default"))[0].run_id)
-    acts = [s for t in full.turns for s in t.spans if s.kind.value == "act"]
-    assert len(acts) == 1
-    assert acts[0].attributes["tool_name"] == "boom"
-    assert acts[0].status == "error"
-    assert "RuntimeError" in acts[0].attributes["result"]["stderr"]
-    assert "kaboom" in acts[0].attributes["result"]["stderr"]
+    all_spans = [s for t in full.turns for s in t.spans]
+    tools = [s for s in all_spans if s.kind == SpanKind.TOOL]
+    assert len(tools) == 1
+    assert tools[0].attributes[ATTR_TOOL_NAME] == "boom"
+    assert tools[0].status == "error"
+    parsed = json.loads(tools[0].attributes[ATTR_TOOL_RESULT])
+    assert "RuntimeError" in parsed["stderr"]
+    assert "kaboom" in parsed["stderr"]
     await _shutdown(task)
 
 
 # ----------------------------------------------------------------------
-# #2 Span.parent_id = turn_id
+# #5 父 ID 关系：tool 挂在 act 下，act / reasoning / compress 挂在 turn 下
 # ----------------------------------------------------------------------
 
-async def test_spans_have_parent_id_equal_to_turn_id(tmp_path: Path):
-    """所有 span 的 parent_id 应该等于其所在 turn 的 turn_id。"""
+async def test_span_parent_id_relations(tmp_path: Path):
+    """parent_id 关系：
+    - TURN 容器：parent_id = loop_span_id（不开新 file 是 loop 不开；本测试不开 trace 都不行）
+    - ACT 容器：parent_id = turn_span_id
+    - TOOL span：parent_id = act_span_id
+    - REASONING / COMPRESS span：parent_id = turn_span_id
+
+    简化：本测试只跑 tool 路径，验证 TOOL → ACT → TURN 三层关系。
+    """
     store = JsonlTraceStore(tmp_path / "traces.jsonl")
     collector = TraceCollector(store, "default")
     llm = _MockLLMTool()
@@ -547,8 +579,19 @@ async def test_spans_have_parent_id_equal_to_turn_id(tmp_path: Path):
 
     full = await store.get_run("default", (await store.list_runs("default"))[0].run_id)
     for turn in full.turns:
-        for span in turn.spans:
-            assert span.parent_id == turn.turn_id, (
-                f"span {span.span_id} parent_id={span.parent_id} != turn {turn.turn_id}"
-            )
+        by_kind = {s.kind: s for s in turn.spans}
+        # TURN 容器必须存在
+        assert SpanKind.TURN in by_kind, [s.kind for s in turn.spans]
+        turn_span_id = by_kind[SpanKind.TURN].span_id
+        # ACT 挂在 TURN 下
+        if SpanKind.ACT in by_kind:
+            assert by_kind[SpanKind.ACT].parent_id == turn_span_id
+            # TOOL 挂在 ACT 下
+            for s in turn.spans:
+                if s.kind == SpanKind.TOOL:
+                    assert s.parent_id == by_kind[SpanKind.ACT].span_id
+        # REASONING / COMPRESS 直接挂在 TURN 下
+        for s in turn.spans:
+            if s.kind in (SpanKind.REASONING, SpanKind.COMPRESS):
+                assert s.parent_id == turn_span_id
     await _shutdown(task)

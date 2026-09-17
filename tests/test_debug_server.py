@@ -161,8 +161,14 @@ class TestDebugServer:
             assert status == 200
             payload = json.loads(body.decode())
             assert payload["run_id"] == rid
+            assert payload["schema_version"] == 2
             assert len(payload["turns"]) == 1
-            assert payload["turns"][0]["spans"][0]["attributes"]["model"] == "m1"
+            # v2：spans[0] 是 TURN 容器，spans[1] 才是 reasoning
+            turn_spans = payload["turns"][0]["spans"]
+            assert len(turn_spans) == 2
+            assert turn_spans[0]["kind"] == "turn"
+            assert turn_spans[1]["kind"] == "reasoning"
+            assert turn_spans[1]["attributes"]["gen_ai.request.model"] == "m1"
         finally:
             await h.stop()
 
