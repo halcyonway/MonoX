@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -118,6 +119,10 @@ class LlmProxy(LLMProxyProto):
         )
         chunk_count = 0
         usage_count = 0
+        # TTFT 起点：进 async with 立刻打点；首次产出 delta_text / delta_reasoning
+        # 非空 chunk 时计算 first_chunk_at_ms（monotonic，单位 ms）。
+        request_start = time.monotonic()
+        first_chunk_at_ms: float | None = None
         try:
             async with client.stream("POST", "/chat/completions", json=payload) as resp:
                 # 非 200：把响应 body 读出来打进日志（厂家错误详情都在 body 里）
@@ -136,6 +141,18 @@ class LlmProxy(LLMProxyProto):
                     chunk_count += 1
                     if chunk.usage:
                         usage_count += 1
+                    # 首个非空 content/reasoning chunk：填上 first_chunk_at_ms。
+                    # 注意：tool_calls delta 不算"首 token"（不消耗 output token）。
+                    if first_chunk_at_ms is None and (chunk.delta_text or chunk.delta_reasoning):
+                        first_chunk_at_ms = (time.monotonic() - request_start) * 1000.0
+                        chunk = LlmChunk(
+                            delta_text=chunk.delta_text,
+                            delta_reasoning=chunk.delta_reasoning,
+                            delta_tool_calls=chunk.delta_tool_calls,
+                            finish_reason=chunk.finish_reason,
+                            usage=chunk.usage,
+                            first_chunk_at_ms=first_chunk_at_ms,
+                        )
                     yield chunk
         except Exception:
             _log.exception("llm stream failed: model=%s base_url=%s", model, base_url)

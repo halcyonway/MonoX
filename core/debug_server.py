@@ -222,6 +222,9 @@ class DebugServer:
                         "end_ts": r.end_ts,
                         "status": r.status,
                         "turn_count": r.turn_count,
+                        # v2 起必带；旧 v1 数据归档后不会再出现在 list 里
+                        # （jsonl_store.__post_init__ 已处理），这里只是透传字段。
+                        "schema_version": r.schema_version,
                     }
                     for r in runs
                 ]

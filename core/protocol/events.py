@@ -168,6 +168,10 @@ class LlmChunk:
     delta_tool_calls: tuple[dict[str, Any], ...] | None = None
     finish_reason: str | None = None
     usage: dict[str, Any] | None = None
+    # 自本次 stream() 请求开始（httpx client.stream(...) 调用后）到首个
+    # 非空 delta_text / delta_reasoning 落地的服务端墙钟毫秒数（monotonic）。
+    # None 表示流还没遇到第一个有效 token（被 LlmProxy 填充）。
+    first_chunk_at_ms: float | None = None
 
 
 # ---------- Checkpoint ----------

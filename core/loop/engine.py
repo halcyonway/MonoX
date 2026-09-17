@@ -29,6 +29,7 @@ from core.loop.metric import SessionMetric, StepMetric
 from core.loop.tool_registry import ToolRegistry
 from core.loop.tools.read_tr_budget import ReadToolResultBudgetTool
 from core.observability.collector import TraceCollector
+from core.observability.types import SpanKind
 from core.protocol import (
     CheckpointStore,
     ErrorEvent,
@@ -118,6 +119,10 @@ class LoopEngine:
         # 当前 run / turn 的 trace_id，喂给 StatusChange / MetricChunk / FinalMessage。
         self._run_id: str | None = None
         self._current_turn_id: str | None = None
+        # 当前 open 的 LOOP span id（每次 begin_run 后开 step_task 时设上，
+        # step_task 终结路径负责关）。其他 phase span（bootstrap / finalize）id
+        # 局部持有即可，不必落到 self 上。
+        self._active_loop_id: str | None = None
 
     @property
     def is_busy(self) -> bool:
@@ -148,14 +153,30 @@ class LoopEngine:
         pump_task = asyncio.create_task(pumper())
 
         async def finalize_aborted(status: str) -> None:
-            """中断/异常后的统一清理：回滚半截消息、关 trace、回 idle。"""
+            """中断/异常后的统一清理：回滚半截消息、关 trace、回 idle。
+
+            关掉当前 open 的 loop span（如果有），用 finalize span 包住 end_run，
+            与正常 ok 路径保持「bootstrap → loop → finalize」三段对称。
+            """
             self._messages = self._msgs_before
             self._step_idx -= 1
             self._session_metric.drop_last()
             if self._traces is not None and self._run_id is not None:
+                if self._active_loop_id is not None:
+                    await self._traces.end_span(self._active_loop_id, status=status)
+                    self._active_loop_id = None
+                fz_id = await self._traces.begin_span(
+                    parent_id=self._run_id,
+                    kind=SpanKind.FINALIZE,
+                    name="finalize",
+                )
                 await self._traces.end_run(None, status=status)
+                await self._traces.end_span(fz_id, status=status)
                 self._run_id = None
                 self._current_turn_id = None
+            else:
+                # run_id 都没建上（begin_run 没触发过），active_loop_id 也不该有
+                self._active_loop_id = None
             await output_queue.put(StatusChange(state="idle"))
 
         def take_interrupt() -> InboundEvent | None:
@@ -288,9 +309,19 @@ class LoopEngine:
                                 trace_id=self._run_id,
                             )
                         )
-                        # 可观测性：正常结束 run
+                        # 可观测性：正常结束 run。finalize span 包住 end_run 的"清理
+                        # 收尾"语义；之前 begin_run 时开的 loop span 先关掉。
                         if self._traces is not None and self._run_id is not None:
+                            if self._active_loop_id is not None:
+                                await self._traces.end_span(self._active_loop_id, status="ok")
+                                self._active_loop_id = None
+                            fz_id = await self._traces.begin_span(
+                                parent_id=self._run_id,
+                                kind=SpanKind.FINALIZE,
+                                name="finalize",
+                            )
                             await self._traces.end_run(final_text, status="ok")
+                            await self._traces.end_span(fz_id, status="ok")
                             self._run_id = None
                             self._current_turn_id = None
                         self._step_task = None
@@ -311,9 +342,26 @@ class LoopEngine:
 
                 # react 前快照 messages；cancel 后回滚到该状态
                 self._msgs_before = list(self._messages)
-                # 可观测性：起一次新 run；记录后 self._run_id 可用于 stamp 后续事件
+                # 可观测性：起一次新 run；记录后 self._run_id 可用于 stamp 后续事件。
+                # bootstrap / loop phase span：bootstrap 包住 run setup，loop 包住
+                # _react() 全过程（含多个 step 迭代），finalize 由 step 终结路径
+                # 各自包住 end_run。
                 if self._traces is not None and self._run_id is None:
                     self._run_id = await self._traces.begin_run(ev.text)
+                    bs_id = await self._traces.begin_span(
+                        parent_id=self._run_id,
+                        kind=SpanKind.BOOTSTRAP,
+                        name="bootstrap",
+                    )
+                    # bootstrap 当前没有额外工作（restore 在 engine.run() 启动时
+                    # 已做），立即关掉；保留 span 是为了让 UI 看到一个完整的
+                    # "agent run 启动 → loop → finalize" 3 段结构
+                    await self._traces.end_span(bs_id, status="ok")
+                    self._active_loop_id = await self._traces.begin_span(
+                        parent_id=self._run_id,
+                        kind=SpanKind.LOOP,
+                        name="loop",
+                    )
                 self._step_task = asyncio.create_task(
                     self._react(sub_queue, interrupt_queue, output_queue)
                 )
@@ -442,6 +490,10 @@ class LoopEngine:
                 self._path_vars,
             )
             tool_schemas = self._tools.schemas()
+            # 落 step_metric：本次 LLM 调用下发的 OpenAI function schema 列表
+            # 塞进 reasoning span（gen_ai.request.tool_specs），方便 trace 看
+            # 「这次 LLM 允许用哪些 tool」。
+            step_metric.tool_schemas = list(tool_schemas)
 
             full_text = ""
             reasoning_text = ""
@@ -451,6 +503,9 @@ class LoopEngine:
             # 每个 call_id 是否已经发过 ToolPending；OpenAI 流式 delta 第一个就 set id，
             # 后续 deltas 只是补 args —— 不要重复发。
             pending_emitted: set[str] = set()
+            # 首 chunk 时间（由 LlmProxy 在首个非空 delta 时填）：塞进 step_metric
+            # 给 reasoning span 用（gen_ai.client.time_to_first_token）。
+            first_chunk_at_ms: float | None = None
 
             await output_queue.put(
                 StatusChange(
@@ -473,6 +528,8 @@ class LoopEngine:
                     if not interrupt_queue.empty():
                         interrupt_queue.get_nowait()
                         return _INTERRUPTED
+                    if first_chunk_at_ms is None and chunk.first_chunk_at_ms is not None:
+                        first_chunk_at_ms = chunk.first_chunk_at_ms
                     if chunk.delta_text:
                         full_text += chunk.delta_text
                         await output_queue.put(TokenChunk(text=chunk.delta_text))
@@ -514,6 +571,7 @@ class LoopEngine:
                     "appending system note for self-recovery (no run abort)",
                     type(exc).__name__,
                 )
+                step_metric.ttft_ms = int(first_chunk_at_ms) if first_chunk_at_ms is not None else None
                 if self._traces is not None and self._current_turn_id is not None:
                     await self._traces.record_llm_span(
                         self._current_turn_id,
@@ -524,6 +582,10 @@ class LoopEngine:
                         usage=usage,
                         finish_reason=finish_reason,
                         latency_ms=int((time.monotonic() - t0) * 1000),
+                        ttft_ms=step_metric.ttft_ms,
+                        tool_schemas=step_metric.tool_schemas,
+                        error_type=type(exc).__name__,
+                        error_message=str(exc),
                         status="error",
                     )
                 self._messages.append({
@@ -552,12 +614,18 @@ class LoopEngine:
                         usage=usage,
                         finish_reason=finish_reason,
                         latency_ms=int((time.monotonic() - t0) * 1000),
+                        ttft_ms=step_metric.ttft_ms,
+                        tool_schemas=step_metric.tool_schemas,
+                        error_type=type(exc).__name__,
+                        error_message=str(exc),
                         status="error",
                     )
                 raise
 
             step_metric.latency_ms = int((time.monotonic() - t0) * 1000)
             step_metric.tokens = usage
+            if first_chunk_at_ms is not None:
+                step_metric.ttft_ms = int(first_chunk_at_ms)
 
             # 每个 step 完成后立即发 MetricChunk（不依赖后面是 final 还是 tool 路径）。
             # 之前只 tool dispatch 之后才发，导致纯对话 turn（agent finish_reason=stop，
@@ -595,6 +663,8 @@ class LoopEngine:
                     usage=usage,
                     finish_reason=finish_reason,
                     latency_ms=step_metric.latency_ms,
+                    ttft_ms=step_metric.ttft_ms,
+                    tool_schemas=step_metric.tool_schemas,
                     status="ok",
                 )
 
@@ -641,6 +711,16 @@ class LoopEngine:
             )
             await output_queue.put(StatusChange(state="tooling"))
 
+            # 可观测性：本 turn 一旦决定要调 tool，先发一个 ACT 容器 span（装下
+            # 本 turn 所有 TOOL span）。tool_calls_count=0 时不发（turn #final
+            # message 分支不走这里）。
+            if self._traces is not None and self._current_turn_id is not None:
+                await self._traces.record_act_span(
+                    self._current_turn_id,
+                    tool_calls_count=len(tool_calls),
+                    status="ok",
+                )
+
             has_wait_io = False
             for tc in tool_calls:
                 call_id = tc.get("id", "")
@@ -662,11 +742,12 @@ class LoopEngine:
                         exit_code=0,
                     )
                     await output_queue.put(ToolEnd(name=name, result=result, latency_ms=0))
-                    # 可观测性：wait_io 是循环暂停信号，记一条 act span 让 UI 能渲染。
+                    # 可观测性：wait_io 是循环暂停信号，记一条 TOOL span 让 UI 能渲染。
                     if self._traces is not None and self._current_turn_id is not None:
-                        await self._traces.record_act_span(
+                        await self._traces.record_tool_span(
                             self._current_turn_id,
                             tool_name=name,
+                            call_id=call_id,
                             args=args,
                             result=_tool_result_to_dict(result),
                             latency_ms=0,
@@ -723,9 +804,10 @@ class LoopEngine:
                             latency_ms=latency_ms,
                         ))
                         if self._traces is not None and self._current_turn_id is not None:
-                            await self._traces.record_act_span(
+                            await self._traces.record_tool_span(
                                 self._current_turn_id,
                                 tool_name=name,
+                                call_id=call_id,
                                 args=args,
                                 result=_tool_result_to_dict(cancelled_result),
                                 latency_ms=latency_ms,
@@ -756,15 +838,39 @@ class LoopEngine:
 
                 await output_queue.put(ToolEnd(name=name, result=result, latency_ms=latency_ms))
 
-                # 可观测性：act span 记 tool 调用全貌（args / result / latency / status）。
+                # 可观测性：TOOL span 记 tool 调用全貌（OTel tool.* 字段）。
                 if self._traces is not None and self._current_turn_id is not None:
-                    await self._traces.record_act_span(
+                    rdict = _tool_result_to_dict(result)
+                    # 把非 OTel 字段塞进 artifacts（stdout / stderr / exit_code / budget_id）
+                    # OTel 标准化字段（status / truncated）已由 collector 提取到
+                    # tool.result.status / tool.result.truncated
+                    artifacts = {
+                        k: rdict.get(k)
+                        for k in ("stdout", "stderr", "exit_code", "budget_id")
+                        if k in rdict
+                    }
+                    err_type = None
+                    err_msg = None
+                    if tool_status == "error" and isinstance(result.stderr, str) and result.stderr:
+                        # 自定义 tool 直接 raise 的路径：stderr 里是 "{Type}: {msg}"
+                        # 把 type 部分提到 error.type，message 留作 error.message
+                        first, _, rest = result.stderr.partition(":")
+                        if first and first.replace("_", "").isalnum():
+                            err_type = first.strip()
+                            err_msg = rest.strip() or result.stderr
+                        else:
+                            err_msg = result.stderr
+                    await self._traces.record_tool_span(
                         self._current_turn_id,
                         tool_name=name,
+                        call_id=call_id,
                         args=args,
-                        result=_tool_result_to_dict(result),
+                        result=rdict,
                         latency_ms=latency_ms,
-                        status=tool_status,
+                        artifacts=artifacts or None,
+                        status=tool_status,  # type: ignore[arg-type]
+                        error_type=err_type,
+                        error_message=err_msg,
                     )
                     # L1 实际发生了折叠（result.truncated 翻 True）才记 compress span。
                     if not was_truncated and result.truncated:

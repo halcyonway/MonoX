@@ -21,6 +21,8 @@ class RunSummary:
     end_ts: float | None
     status: str
     turn_count: int
+    # v2 起必带；旧 v1 数据归档后不会再出现在 list 里
+    schema_version: int = 1
 
 
 class TraceStore(Protocol):
