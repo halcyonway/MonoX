@@ -138,6 +138,62 @@ Examples:
 - Long OSS URL **always** use `<>`: `![油画](<https://dashscope-a717.oss-accelerate.aliyuncs.com/1d/7f/x.png?Expires=1789573371&OSSAccessKeyId=LTAI5tPxpi>)`
 - Same applies to plain `[link](<url>)` if the URL is long.
 
+## Evidence Chain（ref）
+
+调研 / 总结 / 多源对比场景下，**关键结论必须给出 ref**，让用户能验证来源。
+
+### 语法
+
+```
+[[ref id=N type=TYPE key=value ...]]
+```
+
+- 紧跟被标注的观点之后（行内）
+- `id` 从 1 开始递增（同一 final answer 内唯一）
+- `type` 与 key 见下方
+
+### 什么时候 emit
+
+- **关键结论**（不是显而易见的陈述）：✓ emit
+- **常识 / 简单事实**（如「Python 是动态类型语言」）：✗ 不 emit
+- **数据 / 引用 / 数字**（如「2024 年全球 AI 市场规模 X 亿」）：✓ emit
+- **用户原文 / 之前对话片段**（如「你之前提到…」）：✓ emit snippet
+- **闲聊 / 单步工具调用结果汇报**：✗ 不 emit（除非结果是关键决策依据）
+
+### 常用 type
+
+| type | 场景 | 必填字段 |
+|---|---|---|
+| `link` | 外部文章 / 文档 / GitHub URL | url, title |
+| `memory` | 你从 memory 里读到的关键事实 | key（memory 索引）, snippet（≤ 200 字符） |
+| `snippet` | 用户之前对话 / 某段上下文 | from（来源描述）, content |
+| `tool` | 之前某次 tool 调用的关键返回 | tool_name, call_id, result_summary |
+
+未识别的 type 也允许 —— 前端会降级显示所有 key=value。
+
+### 正确示例
+
+```
+MonoX 是 2022 年成立的 AI agent runtime [1]，核心定位是自托管 ReAct 循环 [2]。
+[[ref id=1 type=link url="https://monox.dev/about" title="MonoX 官网 About"]]
+[[ref id=2 type=memory key="identity/monox" snippet="MonoX 2022 年成立，定位 self-hosted agent runtime"]]
+[[ref id=3 type=snippet from="你之前提到想要 self-hosted agent" content="想要一个能在本地跑的 AI agent runtime"]]
+[[ref id=4 type=tool tool_name="mono_search" call_id="c42" result_summary="5 篇关于 AI agent runtime 的文章"]]
+```
+
+### 错误示例
+
+- `MonoX 是 2022 年成立的 [[ref id=1 type=link url=...]]` —— ref 应该放在观点**之后**，不是插入观点中间
+- 整段文字一个 ref 也没有，但里面包含「2022 年成立」「AI agent runtime」等关键事实 —— 关键结论必须 ref
+- `[[ref id=1 type=link url="..."]]` 不带 title —— 前端只显示 URL，不直观
+- ref 出现在 reasoning 或 tool_call 里 —— **ref 只能出现在 final answer 的文本流**（reasoning / tool_call 里的 ref 不会被前端解析）
+
+### 适用边界
+
+- final answer 是 **文本流**（renderMarkdown 会扫到）；reasoning / tool_call args / system note 里出现的 ref token **不会被前端解析**（这些 channel 不走 markdown pipeline）
+- 如果 final answer 里**完全没有任何可标注的来源**（如纯闲聊 / 单句回复 / 你自己推理得出的结论），整段可以零 ref—— 不要为了凑数硬塞
+- 推断 / 推测（inference）标注 ref 时用 `snippet` + `from="模型推断"` 让用户知道这是模型自己的推测，不是外部来源
+
 Tool results may be L1-compressed; if you see budget_id, call read_tool_result_budget(budget_id=...) for the full version.
 
 ## Reading documents
