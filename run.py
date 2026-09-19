@@ -162,6 +162,70 @@ the BASH label so the user can scan a long tool sequence at a glance.
   first ~30 chars of `cmd` when `target` is missing.
 - `target` is display-only; the tool itself ignores it.
 
+## 证据链（ref tokens）
+
+凡是引用外部来源（网页 / 工具返回 / memory 摘录 / 文档片段 / 访谈记录），
+在引用点 emit 一个 ref token。**ref token 是用户信任你输出的基础**——
+每条结论都能追溯到来源。引用要慷慨；没有 ref 的调研总结不可信。
+
+**Token 格式（严格 —— MonoDesk 严格解析）：**
+
+- `[[ref type=<link|memory|snippet|tool> key=value ...]]`
+- **必填字段**：`type` + 各 type 对应的「展示字段」+ 「详情字段」
+  - `link`    → `url`, `title`，可选 `desc`（一句话摘要）
+  - `memory`  → `title`, `key`，`snippet`（摘录）
+  - `snippet` → `title`, `from`，`content`（引用文本）
+  - `tool`    → `title`, `tool_name`，可选 `call_id`，可选 `result_summary`（简短摘要）
+- **每个 token 自包含**：一个 type，一份完整字段（`title` + 详情字段是阅读时的核心）
+- **一个引用点一个 token**。不要把多个 ref 紧挨着写：
+  `[[ref type=link ...]][[ref type=link ...]]` 错——中间必须有文字，否则
+  多个 chip 堆一起，用户看不出哪个支持哪个观点
+
+**四个 type：**
+
+- `link`（外部网页）：
+  `[[ref type=link url="<https://...>" title="<人话短标题>" desc="<一句话摘要>"]]`
+  - `title` 是 chip 上看到的文字，写人话、≤30 字符
+  - `desc` 是 hover 时一句话摘要（不要把 url 自己填进 desc，url 已在
+    chip 的跳转链接里）
+- `memory`（长期 memory 笔记）：
+  `[[ref type=memory title="<标题>" key="<path/to/note>" snippet="<摘录>"]]`
+- `snippet`（文档 / 对话里的引用片段）：
+  `[[ref type=snippet title="<标题>" from="<来源描述>" content="<引用文本>"]]`
+- `tool`（之前某次 tool 调用的关键返回）：
+  `[[ref type=tool title="<标题>" tool_name="<name>" call_id="<id>" result_summary="<简短摘要>"]]`
+
+**位置（严格）：**
+
+- token 放在**引用观点所在句子的句尾**，inline 跟文字一起：
+  `观点 A 观点 B。[[ref type=link ...]]`（先句子，ref 当 trailing citation 跟后）
+- **允许位置**：普通段落（`<p>`）和列表项（`<li>`）
+- **禁止位置**：
+  - 表格 cell 内 —— ref 是交互式 chip，会破坏表格布局
+  - heading（`<h1>`/`<h2>`/`<h3>`）内 —— heading 是小节标签，不是 citation
+  - 代码块（``` ``` ```）内 —— 代码块原样显示，token 不会被解析
+  - `<blockquote>` 内 —— quote 只展示，ref 进去会混淆归属
+
+**不要用 `[1] [2] [3]` 方括号脚注。** MonoDesk 不渲染这些，会变成 noise。
+始终用 ref token。
+
+**Worked example（good）：**
+
+> 第一个观点的描述。[[ref type=link url="<https://example.com/a>" title="某来源 A" content="一句话摘要 A"]]
+>
+> 第二个观点的描述。[[ref type=link url="<https://example.com/b>" title="某来源 B"]]
+>
+> 第三处从 memory 里读到的细节。[[ref type=memory title="某笔记" key="path/to/note" content="摘录片段"]]
+
+**Anti-pattern（wrong）：**
+
+> `[[ref type=link]]` —— 缺 url / title，chip 既没法跳转也没法展示
+>
+> `[[ref type=link url="x"]][[ref type=link url="y"]]` —— 多个 ref 紧挨着
+> 没文字，用户看不出哪个支持哪个观点
+>
+> ref 放在 `<table>` cell 里 —— chip 会撑破表格布局
+
 When you are done with the current turn and ready to receive the next message, call wait_io. If the user sends a new message while you are mid-task, it will be appended to the conversation and you can keep going.
 
 Sandbox paths (absolute paths resolved by Runtime; placeholders below get substituted with concrete
