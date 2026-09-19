@@ -116,6 +116,11 @@ class LoopEngine:
         self._messages: list[dict[str, Any]] = []
         self._step_idx = 0
         self._session_metric = SessionMetric()
+        # no-tool-call reminder 计数器：检测 reasoning-only turn（content 空 ∧
+        # tool_call 空 ∧ reasoning 非空 ∧ finish_reason=stop）→ 注入 system note
+        # 让 LLM 重出。最多 3 次后放过去，让现有 final-message 路径走。
+        # 见 spec/requirements/no-tool-call-reminder.md。
+        self._no_tool_reminder_count: int = 0
         # 当前 run / turn 的 trace_id，喂给 StatusChange / MetricChunk / FinalMessage。
         self._run_id: str | None = None
         self._current_turn_id: str | None = None
@@ -666,6 +671,55 @@ class LoopEngine:
                     ttft_ms=step_metric.ttft_ms,
                     tool_schemas=step_metric.tool_schemas,
                     status="ok",
+                )
+
+            # no-tool-call reminder：检测 reasoning-only turn（content 空 ∧ tool_call 空
+            # ∧ reasoning 非空 ∧ finish_reason=stop）。上游偶发把 tool_call 漏到 reasoning
+            # content 里，导致空 final + 空 tool_calls，UI 进 wait_io 但什么都看不到。
+            # 注入 system note 让 LLM 下一轮重出 tool_call（或 plain text final）。
+            # 最多 3 次后放过去，让现有 final-message 路径走。
+            # 见 spec/requirements/no-tool-call-reminder.md。
+            no_tool_case = (
+                bool(reasoning_text)
+                and not full_text
+                and not tool_calls
+                and finish_reason == "stop"
+            )
+            if no_tool_case:
+                if self._no_tool_reminder_count < 3:
+                    self._no_tool_reminder_count += 1
+                    _log.warning(
+                        "no-tool-call reminder triggered step=%d count=%d reasoning_len=%d",
+                        self._step_idx,
+                        self._no_tool_reminder_count,
+                        len(reasoning_text),
+                    )
+                    # step_metric 计入 session 总计（final-message / tool dispatch
+                    # 分支都会 add，reminder continue 路径要自己 add，否则 SessionMetric
+                    # 漏算）。
+                    step_metric.tool_calls_count = 0
+                    self._session_metric.add(step_metric)
+                    self._messages.append({
+                        "role": "user",
+                        "content": (
+                            "[system note] Your previous turn returned only reasoning "
+                            "content with no tool call and no final answer text. "
+                            "The reasoning appears to contain a tool call that was "
+                            "not emitted as a structured tool_calls block. "
+                            "Please re-emit the tool call as a proper structured "
+                            "tool_calls in your next response, OR write the final "
+                            "answer as plain text."
+                        ),
+                    })
+                    # 不写 checkpoint（跟 llm-error-recovery §3 同款 system note 一样
+                    # 不持久化，避免污染 replay）。
+                    continue
+                # count 已经 ≥ 3：放过去，走下方 final-message 分支输出空 final + wait_io。
+                _log.warning(
+                    "no-tool-call reminder exhausted after %d attempts, "
+                    "falling through to final-message path step=%d",
+                    self._no_tool_reminder_count,
+                    self._step_idx,
                 )
 
             # 3) final message 分支（agent 没调 tool 或 finish_reason=stop）
