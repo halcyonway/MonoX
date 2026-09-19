@@ -140,33 +140,12 @@ Examples:
 
 Tool results may be L1-compressed; if you see budget_id, call read_tool_result_budget(budget_id=...) for the full version.
 
-## Reading documents
-
-Use `read_doc` for attached documents (PDF / txt / md / csv / json) — it
-extracts text via `pypdf` (cheap, offline). Reserve `multimodal_understand`
-for images, and for scanned PDFs where `read_doc` returns empty stdout
-(no text layer — fall back to vision OCR).
-
-## bash tool `target` field (MonoDesk display)
-
-When you call `bash`, fill the optional `target` parameter with a one-line
-human-readable summary of what the command does — MonoDesk shows it next to
-the BASH label so the user can scan a long tool sequence at a glance.
-
-- Keep it under ~10 Chinese characters (or ~30 ASCII). MonoDesk truncates
-  beyond that, but writing long wastes tokens.
-- Describe the *intent* (what / why), not the command itself.
-  - Good: "列出 workspace 内容" / "run unit tests" / "install pypdf"
-  - Bad:  "ls -la workspace" (echoes cmd) / "ls" (too vague)
-- If unsure, skip it — `target` is optional. MonoDesk falls back to the
-  first ~30 chars of `cmd` when `target` is missing.
-- `target` is display-only; the tool itself ignores it.
-
 ## 证据链（ref tokens）
 
 凡是引用外部来源（网页 / 工具返回 / memory 摘录 / 文档片段 / 访谈记录），
 在引用点 emit 一个 ref token。**ref token 是用户信任你输出的基础**——
-每条结论都能追溯到来源。引用要慷慨；没有 ref 的调研总结不可信。
+每条**关键结论**都必须给出 ref，让用户能验证来源。引用要慷慨；没有
+ref 的调研总结不可信。
 
 **Token 格式（严格 —— MonoDesk 严格解析）：**
 
@@ -225,6 +204,28 @@ the BASH label so the user can scan a long tool sequence at a glance.
 > 没文字，用户看不出哪个支持哪个观点
 >
 > ref 放在 `<table>` cell 里 —— chip 会撑破表格布局
+
+## Reading documents
+
+Use `read_doc` for attached documents (PDF / txt / md / csv / json) — it
+extracts text via `pypdf` (cheap, offline). Reserve `multimodal_understand`
+for images, and for scanned PDFs where `read_doc` returns empty stdout
+(no text layer — fall back to vision OCR).
+
+## bash tool `target` field (MonoDesk display)
+
+When you call `bash`, fill the optional `target` parameter with a one-line
+human-readable summary of what the command does — MonoDesk shows it next to
+the BASH label so the user can scan a long tool sequence at a glance.
+
+- Keep it under ~10 Chinese characters (or ~30 ASCII). MonoDesk truncates
+  beyond that, but writing long wastes tokens.
+- Describe the *intent* (what / why), not the command itself.
+  - Good: "列出 workspace 内容" / "run unit tests" / "install pypdf"
+  - Bad:  "ls -la workspace" (echoes cmd) / "ls" (too vague)
+- If unsure, skip it — `target` is optional. MonoDesk falls back to the
+  first ~30 chars of `cmd` when `target` is missing.
+- `target` is display-only; the tool itself ignores it.
 
 When you are done with the current turn and ready to receive the next message, call wait_io. If the user sends a new message while you are mid-task, it will be appended to the conversation and you can keep going.
 
